@@ -649,7 +649,7 @@ export async function deleteMemberPhotoService(
     // Pathname might be /gymatrix-image/avatars/...
     // We want everything after /bucketName/
     const pathParts = url.pathname.split(`/${bucketName}/`);
-    if (pathParts.length > 1) {
+    if (pathParts.length > 1 && pathParts[1]) {
       const key = pathParts[1];
       await deleteFileFromS3(key);
     }

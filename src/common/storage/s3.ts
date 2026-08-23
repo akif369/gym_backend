@@ -84,6 +84,9 @@ export async function uploadFileToS3(key: string, buffer: Buffer, mimeType: stri
     })
   );
   
+  if (config.s3.endpoint.includes('localhost')) {
+    return `${config.publicApiUrl}${config.apiPrefix}/storage/${bucket}/${key}`;
+  }
   return `${config.s3.endpoint}/${bucket}/${key}`;
 }
 
