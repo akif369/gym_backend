@@ -16,5 +16,6 @@ export async function registerHelmet(fastify: FastifyInstance): Promise<void> {
         }
       : false,
     crossOriginEmbedderPolicy: false, // required for Swagger UI
+    crossOriginResourcePolicy: false, // allow images/resources to load from different origins
   });
 }
