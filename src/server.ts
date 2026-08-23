@@ -31,6 +31,10 @@ async function start() {
       logger.warn('Database connection check failed');
     }
 
+    // Ensure S3 bucket exists
+    const { ensureBucketExists } = await import('./common/storage/s3');
+    await ensureBucketExists();
+
     await fastify.listen({
       port: config.port,
       host: config.host,

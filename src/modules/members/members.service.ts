@@ -604,14 +604,12 @@ export async function uploadMemberPhotoService(
   await getMemberService(orgId, memberId);
 
   const ext = path.extname(filename).toLowerCase() || '.jpg';
-  const photoFilename = `member_${memberId}${ext}`;
-  const uploadPath = path.join(path.resolve(config.uploadDir), 'members', photoFilename);
-
-  const dir = path.dirname(uploadPath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-  fs.writeFileSync(uploadPath, fileBuffer);
-  const photoUrl = `/uploads/members/${photoFilename}`;
+  const photoKey = `avatars/${orgId}/${memberId}-${Date.now()}${ext}`;
+  
+  const { uploadFileToS3 } = await import('../../common/storage/s3');
+  // Determine mime type
+  const mimeType = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
+  const photoUrl = await uploadFileToS3(photoKey, fileBuffer, mimeType);
 
   await db
     .update(members)
@@ -627,4 +625,51 @@ export async function uploadMemberPhotoService(
   });
 
   return { photoUrl };
+}
+
+// ── Delete Member Photo ───────────────────────────────────────────────────────
+
+export async function deleteMemberPhotoService(
+  orgId: string,
+  memberId: string,
+  actorId: string,
+) {
+  const member = await getMemberService(orgId, memberId);
+  if (!member.photoUrl) {
+    return { success: true };
+  }
+
+  const { deleteFileFromS3 } = await import('../../common/storage/s3');
+  const bucketName = config.s3.bucketName;
+  // Extract key from URL
+  // Example URL: http://localhost:3900/gymatrix-image/avatars/org/member-123.jpg
+  // Key is: avatars/org/member-123.jpg
+  try {
+    const url = new URL(member.photoUrl);
+    // Pathname might be /gymatrix-image/avatars/...
+    // We want everything after /bucketName/
+    const pathParts = url.pathname.split(`/${bucketName}/`);
+    if (pathParts.length > 1) {
+      const key = pathParts[1];
+      await deleteFileFromS3(key);
+    }
+  } catch (err) {
+    log.warn({ err, photoUrl: member.photoUrl }, 'Failed to parse or delete S3 object, ignoring.');
+  }
+
+  await db
+    .update(members)
+    .set({ photoUrl: null, updatedAt: new Date() })
+    .where(eq(members.id, memberId));
+
+  await auditLog({
+    organizationId: orgId,
+    actorId,
+    action: AuditAction.MEMBER_UPDATED,
+    entityType: 'member',
+    entityId: memberId,
+    description: 'Member photo deleted',
+  });
+
+  return { success: true };
 }

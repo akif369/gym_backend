@@ -110,6 +110,15 @@ publicWebUrl: optionalEnv(
   // ── Logging ──────────────────────────────────────────────────
   logLevel: optionalEnv('LOG_LEVEL', 'info') as 'debug' | 'info' | 'warn' | 'error',
 
+  // ── S3 / Storage ─────────────────────────────────────────────
+  s3: {
+    endpoint: optionalEnv('S3_ENDPOINT', 'http://localhost:3900'),
+    region: optionalEnv('S3_REGION', 'garage'),
+    accessKeyId: optionalEnv('S3_ACCESS_KEY', 'garage_key'),
+    secretAccessKey: optionalEnv('S3_SECRET_KEY', 'garage_secret'),
+    bucketName: optionalEnv('S3_BUCKET_NAME', 'gymatrix-image'),
+  },
+
   evolutionGo: evolutionGoConfig(),
   membershipExpirySweepIntervalMs: optionalEnvNumber('MEMBERSHIP_EXPIRY_SWEEP_INTERVAL_MS', 60 * 60 * 1000),
   attendanceAutoCheckoutSweepIntervalMs: optionalEnvNumber('ATTENDANCE_AUTO_CHECKOUT_SWEEP_INTERVAL_MS', 60 * 1000),

@@ -31,6 +31,7 @@
   "author": "GymFlow",
   "license": "MIT",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1115.0",
     "@fastify/compress": "^9.2.0",
     "@fastify/cookie": "^11.1.2",
     "@fastify/cors": "^11.3.0",
