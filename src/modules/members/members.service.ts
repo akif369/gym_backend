@@ -642,26 +642,17 @@ export async function deleteMemberPhotoService(
   }
 
   const { deleteFileFromS3 } = await import('../../common/storage/s3');
-  const bucketName = config.s3.bucketName;
 
   try {
-    let key: string;
-
-    // Determine whether we have a legacy full URL or a modern key-only value.
-    // Legacy format: "http://host/bucket/avatars/..."
-    // Modern format: "avatars/org/member-ts.jpg"
-    if (member.photoUrl.startsWith('http://') || member.photoUrl.startsWith('https://')) {
-      // Legacy: parse the key out of the URL
-      const url = new URL(member.photoUrl);
-      const pathParts = url.pathname.split(`/${bucketName}/`);
-      key = pathParts.length > 1 && pathParts[1] ? pathParts[1] : '';
+    // photoUrl stores the S3 object key directly (e.g. "avatars/org/member-ts.jpg").
+    // Legacy full-URL records (pre-presigned-URL migration) are handled gracefully:
+    // if it looks like a URL, skip the S3 delete — the object may have been cleaned up
+    // or the record is stale. Either way we still null out the DB column.
+    const isLegacyUrl = member.photoUrl.startsWith('http://') || member.photoUrl.startsWith('https://');
+    if (!isLegacyUrl) {
+      await deleteFileFromS3(member.photoUrl);
     } else {
-      // Modern: photoUrl IS the key
-      key = member.photoUrl;
-    }
-
-    if (key) {
-      await deleteFileFromS3(key);
+      log.warn({ photoUrl: member.photoUrl }, 'Skipping S3 delete for legacy full-URL record; only clearing DB column.');
     }
   } catch (err) {
     log.warn({ err, photoUrl: member.photoUrl }, 'Failed to delete S3 object, ignoring.');
