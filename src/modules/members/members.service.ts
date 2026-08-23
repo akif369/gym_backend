@@ -604,16 +604,17 @@ export async function uploadMemberPhotoService(
   await getMemberService(orgId, memberId);
 
   const ext = path.extname(filename).toLowerCase() || '.jpg';
+  // Key format: avatars/<orgId>/<memberId>-<timestamp><ext>
   const photoKey = `avatars/${orgId}/${memberId}-${Date.now()}${ext}`;
-  
+
   const { uploadFileToS3 } = await import('../../common/storage/s3');
-  // Determine mime type
   const mimeType = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
-  const photoUrl = await uploadFileToS3(photoKey, fileBuffer, mimeType);
+  // uploadFileToS3 now returns the key, not a full URL
+  const storedKey = await uploadFileToS3(photoKey, fileBuffer, mimeType);
 
   await db
     .update(members)
-    .set({ photoUrl, updatedAt: new Date() })
+    .set({ photoUrl: storedKey, updatedAt: new Date() })
     .where(eq(members.id, memberId));
 
   await auditLog({
@@ -624,7 +625,8 @@ export async function uploadMemberPhotoService(
     entityId: memberId,
   });
 
-  return { photoUrl };
+  // Return the key — the frontend will obtain a presigned URL via GET /storage/sign
+  return { photoKey: storedKey };
 }
 
 // ── Delete Member Photo ───────────────────────────────────────────────────────
@@ -641,20 +643,28 @@ export async function deleteMemberPhotoService(
 
   const { deleteFileFromS3 } = await import('../../common/storage/s3');
   const bucketName = config.s3.bucketName;
-  // Extract key from URL
-  // Example URL: http://localhost:3900/gymatrix-image/avatars/org/member-123.jpg
-  // Key is: avatars/org/member-123.jpg
+
   try {
-    const url = new URL(member.photoUrl);
-    // Pathname might be /gymatrix-image/avatars/...
-    // We want everything after /bucketName/
-    const pathParts = url.pathname.split(`/${bucketName}/`);
-    if (pathParts.length > 1 && pathParts[1]) {
-      const key = pathParts[1];
+    let key: string;
+
+    // Determine whether we have a legacy full URL or a modern key-only value.
+    // Legacy format: "http://host/bucket/avatars/..."
+    // Modern format: "avatars/org/member-ts.jpg"
+    if (member.photoUrl.startsWith('http://') || member.photoUrl.startsWith('https://')) {
+      // Legacy: parse the key out of the URL
+      const url = new URL(member.photoUrl);
+      const pathParts = url.pathname.split(`/${bucketName}/`);
+      key = pathParts.length > 1 && pathParts[1] ? pathParts[1] : '';
+    } else {
+      // Modern: photoUrl IS the key
+      key = member.photoUrl;
+    }
+
+    if (key) {
       await deleteFileFromS3(key);
     }
   } catch (err) {
-    log.warn({ err, photoUrl: member.photoUrl }, 'Failed to parse or delete S3 object, ignoring.');
+    log.warn({ err, photoUrl: member.photoUrl }, 'Failed to delete S3 object, ignoring.');
   }
 
   await db

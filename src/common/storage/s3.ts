@@ -1,4 +1,14 @@
-import { S3Client, CreateBucketCommand, HeadBucketCommand, PutBucketPolicyCommand, PutBucketCorsCommand, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  CreateBucketCommand,
+  HeadBucketCommand,
+  PutBucketPolicyCommand,
+  PutBucketCorsCommand,
+  PutObjectCommand,
+  DeleteObjectCommand,
+  GetObjectCommand,
+} from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../../config/env';
 import { createLogger } from '../logger/index';
 
@@ -47,7 +57,7 @@ export async function ensureBucketExists() {
         );
         log.info({ bucket }, 'S3 bucket policy set to public-read');
 
-        // Set CORS policy to allow web app uploads if we ever do presigned URLs (good practice)
+        // Set CORS policy to allow web app direct uploads via presigned PUT URLs
         await s3Client.send(
           new PutBucketCorsCommand({
             Bucket: bucket,
@@ -73,6 +83,11 @@ export async function ensureBucketExists() {
   }
 }
 
+/**
+ * Upload a file to S3 and return the object **key** (not a full URL).
+ * The key is what gets stored in the database.
+ * Use `getPresignedUrl(key)` to generate a time-limited URL for display.
+ */
 export async function uploadFileToS3(key: string, buffer: Buffer, mimeType: string): Promise<string> {
   const bucket = config.s3.bucketName;
   await s3Client.send(
@@ -83,11 +98,20 @@ export async function uploadFileToS3(key: string, buffer: Buffer, mimeType: stri
       ContentType: mimeType,
     })
   );
-  
-  if (config.s3.endpoint.includes('localhost')) {
-    return `${config.publicApiUrl}${config.apiPrefix}/storage/${bucket}/${key}`;
-  }
-  return `${config.s3.endpoint}/${bucket}/${key}`;
+  // Return the key only — callers must use getPresignedUrl() to serve it
+  return key;
+}
+
+/**
+ * Generate a presigned GET URL for a private S3 object.
+ *
+ * @param key          - The S3 object key (e.g. "avatars/org-id/member-ts.jpg")
+ * @param expiresIn    - Seconds until the URL expires (default 900 = 15 min)
+ */
+export async function getPresignedUrl(key: string, expiresIn = 900): Promise<string> {
+  const bucket = config.s3.bucketName;
+  const command = new GetObjectCommand({ Bucket: bucket, Key: key });
+  return getSignedUrl(s3Client, command, { expiresIn });
 }
 
 export async function deleteFileFromS3(key: string): Promise<void> {
