@@ -17,8 +17,9 @@ function likeTerm(query: string) {
 export async function globalSearchService(
   orgId: string,
   query: string,
-  user: { role: string; permissions: string[] },
+  user: { role: string; permissions: string[]; branchId?: string | null },
 ) {
+  const isGlobal = ['OWNER', 'ORGANIZATION_OWNER'].includes(user.role);
   const term = query.trim().slice(0, 100);
   if (term.length < 2) return { members: [], payments: [] };
 
@@ -43,6 +44,7 @@ export async function globalSearchService(
         .where(and(
           eq(members.organizationId, orgId),
           isNull(members.deletedAt),
+          !isGlobal && user.branchId ? eq(members.branchId, user.branchId) : undefined,
           or(
             ilike(members.firstName, pattern),
             ilike(members.lastName, pattern),
@@ -67,6 +69,7 @@ export async function globalSearchService(
         .from(paymentTransactions)
         .where(and(
           eq(paymentTransactions.organizationId, orgId),
+          !isGlobal && user.branchId ? eq(paymentTransactions.branchId, user.branchId) : undefined,
           or(
             ilike(paymentTransactions.referenceId!, pattern),
             ilike(paymentTransactions.memberName!, pattern),

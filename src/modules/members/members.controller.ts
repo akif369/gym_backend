@@ -10,7 +10,11 @@ import { isStrictPaymentPolicyEnabled } from '../org/org.service';
 
 export const membersController = {
   async list(request: FastifyRequest, reply: FastifyReply) {
-    const result = await listMembersService(request.user.orgId, request.query as any);
+    const query = { ...(request.query as Record<string, unknown>) };
+    if (!['OWNER', 'ORGANIZATION_OWNER'].includes(request.user.role)) {
+      query.branchId = request.user.branchId;
+    }
+    const result = await listMembersService(request.user.orgId, query);
     return reply.send({ ...result, strictPaymentPolicy: await isStrictPaymentPolicyEnabled(request.user.orgId) });
   },
 

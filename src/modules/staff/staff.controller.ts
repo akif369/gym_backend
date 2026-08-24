@@ -9,7 +9,11 @@ import { SYSTEM_PERMISSIONS } from '../../db/schema/rbac.schema';
 
 export const staffController = {
   async list(request: FastifyRequest, reply: FastifyReply) {
-    const result = await listStaffService(request.user.orgId, request.query as any);
+    const query = { ...(request.query as Record<string, unknown>) };
+    if (!['OWNER', 'ORGANIZATION_OWNER'].includes(request.user.role)) {
+      query.branchId = request.user.branchId;
+    }
+    const result = await listStaffService(request.user.orgId, query);
     return reply.send(result);
   },
 
