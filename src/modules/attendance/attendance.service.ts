@@ -177,17 +177,74 @@ export async function checkOutService(
 // ── Currently Inside ──────────────────────────────────────────────────────────
 
 export async function getCurrentlyInsideService(orgId: string) {
-  return db
+  const qualifiedColumn = (table: string, column: string) =>
+    sql`${sql.identifier(table)}.${sql.identifier(column)}`;
+
+  const items = await db
     .select({
       id: attendanceLogs.id,
       memberId: attendanceLogs.memberId,
       memberName: attendanceLogs.memberName,
       checkInAt: attendanceLogs.checkInAt,
       checkInMethod: attendanceLogs.checkInMethod,
+      memberNumber: members.memberNumber,
+      firstName: members.firstName,
+      lastName: members.lastName,
+      planName: sql<string | null>`(
+        SELECT ${qualifiedColumn('member_memberships', 'plan_name')}
+        FROM ${sql.identifier('member_memberships')}
+        WHERE ${qualifiedColumn('member_memberships', 'member_id')} = ${qualifiedColumn('members', 'id')}
+        ORDER BY ${qualifiedColumn('member_memberships', 'created_at')} DESC
+        LIMIT 1
+      )`,
+      membershipEndDate: sql<string | null>`(
+        SELECT ${qualifiedColumn('member_memberships', 'end_date')}
+        FROM ${sql.identifier('member_memberships')}
+        WHERE ${qualifiedColumn('member_memberships', 'member_id')} = ${qualifiedColumn('members', 'id')}
+        ORDER BY ${qualifiedColumn('member_memberships', 'created_at')} DESC
+        LIMIT 1
+      )`,
+      membershipStatusRaw: sql<string | null>`(
+        SELECT ${qualifiedColumn('member_memberships', 'status')}
+        FROM ${sql.identifier('member_memberships')}
+        WHERE ${qualifiedColumn('member_memberships', 'member_id')} = ${qualifiedColumn('members', 'id')}
+        ORDER BY ${qualifiedColumn('member_memberships', 'created_at')} DESC
+        LIMIT 1
+      )`,
     })
     .from(attendanceLogs)
+    .leftJoin(members, eq(attendanceLogs.memberId, members.id))
     .where(and(eq(attendanceLogs.organizationId, orgId), isNull(attendanceLogs.checkOutAt)))
     .orderBy(desc(attendanceLogs.checkInAt));
+
+  return items.map(item => {
+    let calculatedMembershipStatus = item.membershipStatusRaw ? String(item.membershipStatusRaw) : 'INACTIVE';
+    if (item.planName && calculatedMembershipStatus !== 'EXPIRED' && item.membershipEndDate) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const exp = new Date(item.membershipEndDate);
+      if (exp < today) {
+        calculatedMembershipStatus = 'EXPIRED';
+      } else {
+        const diffTime = exp.getTime() - today.getTime();
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+        if (diffDays <= 7) calculatedMembershipStatus = 'EXPIRING';
+      }
+    }
+
+    return {
+      id: item.id,
+      memberId: item.memberId,
+      memberName: item.memberName,
+      checkInAt: item.checkInAt,
+      checkInMethod: item.checkInMethod,
+      memberNumber: item.memberNumber,
+      firstName: item.firstName,
+      lastName: item.lastName,
+      planName: item.planName,
+      membershipStatus: calculatedMembershipStatus,
+    };
+  });
 }
 
 // ── List Attendance ───────────────────────────────────────────────────────────
