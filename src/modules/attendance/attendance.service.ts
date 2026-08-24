@@ -205,6 +205,12 @@ export async function listAttendanceService(orgId: string, query: Record<string,
     conditions.push(eq(attendanceLogs.memberId, query['memberId'] as string));
   }
 
+  // Search by member name stored in the log (fast, no join needed)
+  if (query['search']) {
+    const term = `%${String(query['search']).trim()}%`;
+    conditions.push(sql`${attendanceLogs.memberName} ILIKE ${term}`);
+  }
+
   const decodedCursor = decodeCursor<[string, string]>(cursor);
   if (decodedCursor) {
     const [cursorDate, cursorId] = decodedCursor;
@@ -232,6 +238,7 @@ export async function listAttendanceService(orgId: string, query: Record<string,
 }
 
 // ── Member Attendance History ─────────────────────────────────────────────────
+
 
 export async function getMemberAttendanceService(orgId: string, memberId: string, query: Record<string, unknown>) {
   const [member] = await db.select({ id: members.id }).from(members)
