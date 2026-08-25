@@ -38,3 +38,6 @@ export * from './workouts.schema';
 
 // Audit
 export * from './audit.schema';
+
+// Biometrics
+export * from './biometrics.schema';

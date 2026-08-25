@@ -4,6 +4,7 @@ import { organizations } from './org.schema';
 import { branches } from './org.schema';
 import { members } from './members.schema';
 import { users } from './auth.schema';
+import { biometricEvents } from './biometrics.schema';
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
 
@@ -12,6 +13,7 @@ export const checkInMethodEnum = pgEnum('check_in_method', [
   'QR',
   'RFID',
   'APP',
+  'BIOMETRIC',
 ]);
 
 export const checkOutMethodEnum = pgEnum('check_out_method', [
@@ -35,6 +37,7 @@ export const attendanceLogs = pgTable('attendance_logs', {
   memberName: text('member_name').notNull(), // denormalized for performance
   checkInAt: timestamp('check_in_at', { withTimezone: true }).notNull(),
   checkOutAt: timestamp('check_out_at', { withTimezone: true }),
+  biometricEventId: uuid('biometric_event_id').references(() => biometricEvents.id, { onDelete: 'set null' }),
   checkInMethod: checkInMethodEnum('check_in_method').notNull().default('MANUAL'),
   checkOutMethod: checkOutMethodEnum('check_out_method'),
   checkOutReason: text('check_out_reason'),

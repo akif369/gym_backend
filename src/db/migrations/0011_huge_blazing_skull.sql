@@ -1,0 +1,2 @@
+CREATE TYPE "public"."biometric_device_purpose" AS ENUM('ENTRY', 'EXIT', 'VIDEO', 'OTHER');--> statement-breakpoint
+ALTER TABLE "biometric_devices" ADD COLUMN "purpose" "biometric_device_purpose" DEFAULT 'OTHER' NOT NULL;

@@ -33,6 +33,7 @@ import { notificationsRoutes } from './modules/notifications/notifications.route
 import { searchRoutes } from './modules/search/search.routes';
 import { dashboardRoutes } from './modules/dashboard/dashboard.routes';
 import { storageRoutes } from './modules/storage/storage.routes';
+import { biometricsAdmsRoutes, biometricsApiRoutes } from './modules/biometrics/biometrics.routes';
 
 export async function buildApp() {
   const fastify = Fastify({
@@ -73,6 +74,9 @@ export async function buildApp() {
   // ── Health (no auth, no prefix) ───────────────────────────────────────────────
   await fastify.register(healthRoutes);
 
+  // ── ADMS Routes (no auth, custom protocol) ────────────────────────────────────
+  await fastify.register(biometricsAdmsRoutes, { prefix: '/iclock' });
+
   // ── API v1 Routes ─────────────────────────────────────────────────────────────
   await fastify.register(
     async (api: FastifyInstance) => {
@@ -93,6 +97,7 @@ export async function buildApp() {
       await api.register(reportsRoutes, { prefix: '/reports' });
       await api.register(adminRoutes, { prefix: '/admin' });
       await api.register(storageRoutes, { prefix: '/storage' });
+      await api.register(biometricsApiRoutes, { prefix: '/biometrics' });
     },
     { prefix: config.apiPrefix },
   );
