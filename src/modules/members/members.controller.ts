@@ -19,7 +19,11 @@ export const membersController = {
   },
 
   async create(request: FastifyRequest, reply: FastifyReply) {
-    const member = await createMemberService(request.user.orgId, request.body as any, request.user.userId);
+    const data = request.body as any;
+    if (!['OWNER', 'ORGANIZATION_OWNER'].includes(request.user.role)) {
+      data.branchId = request.user.branchId;
+    }
+    const member = await createMemberService(request.user.orgId, data, request.user.userId);
     return reply.status(201).send({ member });
   },
 
