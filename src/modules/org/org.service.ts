@@ -228,6 +228,24 @@ export async function getMemberSettingsService(orgId: string, branchId?: string 
   };
 }
 
+export async function isAutoSyncBiometricsEnabled(orgId: string): Promise<boolean> {
+  const [setting] = await db
+    .select({ value: settings.value })
+    .from(settings)
+    .where(and(
+      eq(settings.organizationId, orgId),
+      eq(settings.category, 'biometrics'),
+      isNull(settings.branchId),
+    ))
+    .limit(1);
+
+  const value = setting?.value;
+  return typeof value === 'object'
+    && value !== null
+    && 'autoSync' in value
+    && value.autoSync === true;
+}
+
 export async function upsertSettingService(
   orgId: string,
   category: string,
@@ -306,6 +324,10 @@ export async function upsertSettingService(
       throw AppError.badRequest(ErrorCode.BAD_REQUEST, 'Days before inactive must be a whole number between 0 and 365');
     }
     value = { daysBeforeInactive };
+  } else if (category === 'biometrics') {
+    if (typeof settingValue.autoSync !== 'boolean') {
+      throw AppError.badRequest(ErrorCode.BAD_REQUEST, 'Biometrics settings must include boolean autoSync');
+    }
   }
 
   // Upsert — update if exists, insert if not

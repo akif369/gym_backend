@@ -1,5 +1,5 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
-import { processAdmsAttendance, listDevicesService, registerDeviceService, deleteDeviceService } from './biometrics.service';
+import { processAdmsAttendance, processAdmsGetRequest, processAdmsDeviceCmd, listDevicesService, listIdentitiesService, registerDeviceService, deleteDeviceService, syncMemberToBiometricsService } from './biometrics.service';
 import { db } from '../../db/index';
 import { biometricDevices } from '../../db/schema/biometrics.schema';
 import { eq } from 'drizzle-orm';
@@ -49,11 +49,21 @@ export async function admsCdata(req: FastifyRequest, reply: FastifyReply) {
 }
 
 export async function admsGetRequest(req: FastifyRequest, reply: FastifyReply) {
+  const sn = (req.query as any).SN;
+  if (!sn) {
+    return reply.status(400).send('OK');
+  }
+  const cmd = await processAdmsGetRequest(sn);
   reply.header('Content-Type', 'text/plain');
-  return reply.send('OK\n');
+  return reply.send(cmd + '\n');
 }
 
 export async function admsDeviceCmd(req: FastifyRequest, reply: FastifyReply) {
+  const sn = (req.query as any).SN;
+  const payload = req.body as string;
+  if (sn && payload) {
+    await processAdmsDeviceCmd(sn, payload);
+  }
   reply.header('Content-Type', 'text/plain');
   return reply.send('OK\n');
 }
@@ -64,6 +74,12 @@ export async function listDevices(req: FastifyRequest, reply: FastifyReply) {
   const orgId = req.user.orgId;
   const devices = await listDevicesService(orgId);
   return reply.send({ data: devices });
+}
+
+export async function listIdentities(req: FastifyRequest, reply: FastifyReply) {
+  const orgId = req.user.orgId;
+  const identities = await listIdentitiesService(orgId);
+  return reply.send({ data: identities });
 }
 
 export async function registerDevice(req: FastifyRequest, reply: FastifyReply) {
@@ -78,4 +94,11 @@ export async function deleteDevice(req: FastifyRequest, reply: FastifyReply) {
   const { deviceId } = req.params as any;
   await deleteDeviceService(orgId, deviceId);
   return reply.status(204).send();
+}
+
+export async function syncMemberToDevice(req: FastifyRequest, reply: FastifyReply) {
+  const orgId = req.user.orgId;
+  const { memberId, pin, name, branchId } = req.body as any;
+  const result = await syncMemberToBiometricsService(orgId, branchId, memberId, pin, name);
+  return reply.send(result);
 }

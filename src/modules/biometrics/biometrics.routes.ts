@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { admsRegistry, admsCdata, admsGetRequest, admsDeviceCmd, listDevices, registerDevice, deleteDevice } from './biometrics.controller';
+import { admsRegistry, admsCdata, admsGetRequest, admsDeviceCmd, listDevices, listIdentities, registerDevice, deleteDevice, syncMemberToDevice } from './biometrics.controller';
 import { requireAuth } from '../../common/auth/requireAuth';
 
 export async function biometricsAdmsRoutes(app: FastifyInstance) {
@@ -24,6 +24,8 @@ export async function biometricsApiRoutes(app: FastifyInstance) {
   app.addHook('onRequest', requireAuth);
 
   app.get('/', listDevices);
+  app.get('/identities', listIdentities);
   app.post('/', registerDevice);
   app.delete('/:deviceId', deleteDevice);
+  app.post('/sync', syncMemberToDevice);
 }

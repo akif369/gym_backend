@@ -18,6 +18,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { config } from '../../config/env';
 import { sendTextMessage } from '../notifications/notifications.service';
+import { isAutoSyncBiometricsEnabled } from '../org/org.service';
+import { syncMemberToBiometricsService } from '../biometrics/biometrics.service';
 
 const log = createLogger('members-service');
 
@@ -310,6 +312,19 @@ export async function createMemberService(
     }).catch(err => log.error({ err, memberId: member.id }, 'Failed to send welcome message'));
   } catch (err) {
     log.error({ err, memberId: member.id }, 'Failed to initiate welcome message');
+  }
+
+  try {
+    const autoSync = await isAutoSyncBiometricsEnabled(orgId);
+    if (autoSync && member.branchId) {
+      // Use numeric part of memberNumber as PIN (e.g. GYM0001 -> 1)
+      const pin = member.memberNumber.replace(/\D/g, '');
+      const name = `${member.firstName} ${member.lastName}`.trim().substring(0, 24); // Device limits name length
+      await syncMemberToBiometricsService(orgId, member.branchId, member.id, pin || member.id.substring(0, 8), name);
+      log.info({ memberId: member.id, pin }, 'Auto-synced new member to biometrics');
+    }
+  } catch (err) {
+    log.error({ err, memberId: member.id }, 'Failed to auto-sync biometrics');
   }
 
   return member;

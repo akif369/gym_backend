@@ -57,7 +57,7 @@ export async function orgRoutes(fastify: FastifyInstance): Promise<void> {
   }, orgController.getSettings);
 
   const settingsCategories = [
-    'gym-profile', 'branch', 'attendance', 'tax', 'invoice', 'hardware', 'payment-policy', 'member',
+    'gym-profile', 'branch', 'attendance', 'tax', 'invoice', 'hardware', 'payment-policy', 'member', 'biometrics'
   ];
 
   for (const category of settingsCategories) {
