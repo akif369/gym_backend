@@ -2,7 +2,7 @@ import { db } from '../../db/index';
 import { biometricDevices, biometricEvents, biometricIdentities, biometricDeviceCommands } from '../../db/schema/biometrics.schema';
 import { attendanceLogs } from '../../db/schema/attendance.schema';
 import { members } from '../../db/schema/members.schema';
-import { eq, and, desc, asc, ne } from 'drizzle-orm';
+import { eq, and, desc, asc, ne, isNull } from 'drizzle-orm';
 import { createLogger } from '../../common/logger/index';
 import crypto from 'crypto';
 import { AppError, ErrorCode } from '../../common/errors/AppError';
@@ -83,27 +83,47 @@ export async function processAdmsAttendance(
         const [member] = await db.select({ firstName: members.firstName, lastName: members.lastName }).from(members).where(eq(members.id, identity.memberId)).limit(1);
         
         if (member) {
-          // Check if already checked in recently to avoid spam (e.g. within last hour)
-          const [recentLog] = await db.select().from(attendanceLogs)
+          // Check if they are currently inside (i.e., have an active session with no checkOutAt)
+          const [activeLog] = await db.select().from(attendanceLogs)
             .where(and(
               eq(attendanceLogs.memberId, identity.memberId),
-              eq(attendanceLogs.checkInMethod, 'BIOMETRIC')
+              isNull(attendanceLogs.checkOutAt)
             ))
             .orderBy(desc(attendanceLogs.checkInAt))
             .limit(1);
 
-          const oneHour = 60 * 60 * 1000;
-          if (!recentLog || (eventTime.getTime() - recentLog.checkInAt.getTime() > oneHour)) {
-            await db.insert(attendanceLogs).values({
-              organizationId: device.organizationId,
-              branchId: device.branchId,
-              memberId: identity.memberId,
-              memberName: `${member.firstName} ${member.lastName}`,
-              checkInAt: eventTime,
-              checkInMethod: 'BIOMETRIC',
-              biometricEventId: event.id,
-            });
-            log.info({ memberId: identity.memberId, eventId: event.id }, 'Processed biometric check-in');
+          if (activeLog) {
+            // Already checked in. Treat punch as Check Out (cooldown 1 minute to avoid double-swipe)
+            const oneMinute = 60 * 1000;
+            if (eventTime.getTime() - activeLog.checkInAt.getTime() > oneMinute) {
+              await db.update(attendanceLogs)
+                .set({ checkOutAt: eventTime, checkOutMethod: 'BIOMETRIC' })
+                .where(eq(attendanceLogs.id, activeLog.id));
+              log.info({ memberId: identity.memberId, eventId: event.id }, 'Processed biometric check-out');
+            }
+          } else {
+            // Not checked in. Treat punch as Check In.
+            // Check last checkout to avoid spam (cooldown 1 minute)
+            const [lastLog] = await db.select().from(attendanceLogs)
+              .where(eq(attendanceLogs.memberId, identity.memberId))
+              .orderBy(desc(attendanceLogs.checkInAt))
+              .limit(1);
+            
+            const lastTime = lastLog?.checkOutAt || lastLog?.checkInAt;
+            const oneMinute = 60 * 1000;
+            
+            if (!lastTime || (eventTime.getTime() - lastTime.getTime() > oneMinute)) {
+              await db.insert(attendanceLogs).values({
+                organizationId: device.organizationId,
+                branchId: device.branchId,
+                memberId: identity.memberId,
+                memberName: `${member.firstName} ${member.lastName}`,
+                checkInAt: eventTime,
+                checkInMethod: 'BIOMETRIC',
+                biometricEventId: event.id,
+              });
+              log.info({ memberId: identity.memberId, eventId: event.id }, 'Processed biometric check-in');
+            }
           }
         }
       } catch (err) {
