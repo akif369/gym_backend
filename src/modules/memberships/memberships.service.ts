@@ -13,6 +13,7 @@ import { sendTextMessage, sendMediaMessage } from '../notifications/notification
 import { getInvoiceSettingsService, getTaxSettingsService, getMemberSettingsService } from '../org/org.service';
 import { invoices } from '../../db/schema/payments.schema';
 import { organizations, branches } from '../../db/schema/org.schema';
+import { syncMemberBiometricAccessService } from '../biometrics/biometrics.service';
 
 const log = createLogger('memberships-service');
 
@@ -360,6 +361,10 @@ export async function activateMembershipService(orgId: string, memberId: string,
 
   await emitEvent(membership.id, memberId, 'ACTIVATED', actorId, actorName);
   await auditLog({ organizationId: orgId, actorId, action: AuditAction.MEMBERSHIP_ACTIVATED, entityType: 'membership', entityId: membership.id });
+
+  syncMemberBiometricAccessService(orgId, memberId)
+    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership activation'));
+
   return updated;
 }
 
@@ -441,6 +446,9 @@ export async function renewMembershipService(
     return newMembership;
   });
 
+  syncMemberBiometricAccessService(orgId, memberId)
+    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership renewal'));
+
   sendRenewalNotification(orgId, memberId, membership!, plan, actorId, data.invoiceAmount)
     .catch((error) => {
       // A provider outage must not undo a completed membership renewal.
@@ -504,6 +512,9 @@ export async function expireDueMembershipsService() {
   let notified = 0;
 
   for (const { candidate, updated } of expiredMemberships) {
+    syncMemberBiometricAccessService(candidate.organizationId, updated.memberId)
+      .catch(err => log.error({ err, memberId: updated.memberId }, 'Failed to sync biometric access on membership expiry sweep'));
+
     if (!candidate.phone) continue;
     try {
       const memberName = `${candidate.firstName} ${candidate.lastName}`.trim();
@@ -605,6 +616,9 @@ export async function sweepInactiveMembersService() {
             entityId: member.id,
             description: `Member status updated to INACTIVE due to ${daysBeforeInactive} days of expiry`,
           }, tx);
+
+          syncMemberBiometricAccessService(target.orgId, member.id)
+            .catch(err => log.error({ err, memberId: member.id }, 'Failed to sync biometric access on inactive sweep'));
         }
       }
     }
@@ -656,6 +670,9 @@ export async function freezeMembershipService(
     return res;
   });
 
+  syncMemberBiometricAccessService(orgId, memberId)
+    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership freeze'));
+
   return updated;
 }
 
@@ -682,6 +699,9 @@ export async function resumeMembershipService(orgId: string, memberId: string, a
     
     return res;
   });
+
+  syncMemberBiometricAccessService(orgId, memberId)
+    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership resume'));
 
   return updated;
 }
@@ -716,6 +736,9 @@ export async function cancelMembershipService(orgId: string, memberId: string, r
     return res;
   });
 
+  syncMemberBiometricAccessService(orgId, memberId)
+    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership cancellation'));
+
   return updated;
 }
 
@@ -744,6 +767,9 @@ export async function extendMembershipService(orgId: string, memberId: string, d
     
     return res;
   });
+
+  syncMemberBiometricAccessService(orgId, memberId)
+    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership extension'));
 
   return updated;
 }

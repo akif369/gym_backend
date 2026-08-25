@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, pgEnum, foreignKey } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, text, timestamp, pgEnum, foreignKey, integer } from 'drizzle-orm/pg-core';
 import { organizations, branches } from './org.schema';
 import { members } from './members.schema';
 
@@ -106,6 +106,9 @@ export const biometricIdentities = pgTable('biometric_identities', {
     .notNull()
     .references(() => biometricDevices.id, { onDelete: 'cascade' }),
   deviceUserId: text('device_user_id').notNull(),
+  accessGroup: integer('access_group').default(1).notNull(), // 1 = Active / Allowed, 99 = Denied
+  syncStatus: text('sync_status').default('PENDING').notNull(), // 'PENDING' | 'SYNCED' | 'FAILED'
+  lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });

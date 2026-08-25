@@ -1,5 +1,16 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
-import { processAdmsAttendance, processAdmsGetRequest, processAdmsDeviceCmd, listDevicesService, listIdentitiesService, registerDeviceService, deleteDeviceService, syncMemberToBiometricsService } from './biometrics.service';
+import {
+  processAdmsAttendance,
+  processAdmsGetRequest,
+  processAdmsDeviceCmd,
+  listDevicesService,
+  listIdentitiesService,
+  registerDeviceService,
+  deleteDeviceService,
+  syncMemberToBiometricsService,
+  syncMemberBiometricAccessService,
+  reconcileBiometricAccessService,
+} from './biometrics.service';
 import { db } from '../../db/index';
 import { biometricDevices } from '../../db/schema/biometrics.schema';
 import { eq } from 'drizzle-orm';
@@ -98,7 +109,21 @@ export async function deleteDevice(req: FastifyRequest, reply: FastifyReply) {
 
 export async function syncMemberToDevice(req: FastifyRequest, reply: FastifyReply) {
   const orgId = req.user.orgId;
-  const { memberId, pin, name, branchId } = req.body as any;
-  const result = await syncMemberToBiometricsService(orgId, branchId, memberId, pin, name);
+  const { memberId, pin, name, branchId, accessGroup } = req.body as any;
+  const result = await syncMemberToBiometricsService(orgId, branchId, memberId, pin, name, accessGroup);
+  return reply.send(result);
+}
+
+export async function syncMemberAccess(req: FastifyRequest, reply: FastifyReply) {
+  const orgId = req.user.orgId;
+  const { memberId } = req.params as any;
+  const result = await syncMemberBiometricAccessService(orgId, memberId, { force: true });
+  return reply.send(result);
+}
+
+export async function reconcileBiometrics(req: FastifyRequest, reply: FastifyReply) {
+  const orgId = req.user.orgId;
+  const { branchId } = (req.body as any) || {};
+  const result = await reconcileBiometricAccessService(orgId, branchId);
   return reply.send(result);
 }

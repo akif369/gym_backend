@@ -2,12 +2,62 @@ import { db } from '../../db/index';
 import { biometricDevices, biometricEvents, biometricIdentities, biometricDeviceCommands } from '../../db/schema/biometrics.schema';
 import { attendanceLogs } from '../../db/schema/attendance.schema';
 import { members } from '../../db/schema/members.schema';
-import { eq, and, desc, asc, ne, isNull } from 'drizzle-orm';
+import { memberMemberships } from '../../db/schema/memberships.schema';
+import { organizations } from '../../db/schema/org.schema';
+import { eq, and, desc, asc, ne, isNull, sql } from 'drizzle-orm';
 import { createLogger } from '../../common/logger/index';
 import crypto from 'crypto';
 import { AppError, ErrorCode } from '../../common/errors/AppError';
 
 const log = createLogger('biometrics-service');
+
+export function currentDateInTimeZone(timeZone: string) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+    const part = (type: string) => parts.find(item => item.type === type)?.value;
+    return `${part('year')}-${part('month')}-${part('day')}`;
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+/**
+ * Calculates whether a member should be in Access Group 1 (Active/Allowed) or Group 99 (Denied).
+ * Group 1: Member status is ACTIVE AND member has at least one active membership with endDate >= today.
+ * Group 99: All other statuses (EXPIRED, FROZEN, INACTIVE, ARCHIVED, CANCELLED) or no active membership.
+ */
+export async function calculateMemberAccessGroup(orgId: string, memberId: string, tx: any = db): Promise<number> {
+  const [member] = await tx
+    .select({
+      id: members.id,
+      status: members.status,
+      deletedAt: members.deletedAt,
+      orgTimezone: organizations.timezone,
+    })
+    .from(members)
+    .innerJoin(organizations, eq(organizations.id, members.organizationId))
+    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId)))
+    .limit(1);
+
+  if (!member || member.deletedAt || member.status !== 'ACTIVE') {
+    return 99;
+  }
+
+  const todayStr = currentDateInTimeZone(member.orgTimezone || 'Asia/Kolkata');
+
+  // Check if member has at least one ACTIVE membership that hasn't expired
+  const [activePlan] = await tx
+    .select({ id: memberMemberships.id })
+    .from(memberMemberships)
+    .where(and(
+      eq(memberMemberships.memberId, memberId),
+      eq(memberMemberships.status, 'ACTIVE'),
+      sql`${memberMemberships.endDate} >= ${todayStr}`
+    ))
+    .limit(1);
+
+  return activePlan ? 1 : 99;
+}
 
 export async function processAdmsAttendance(
   deviceSn: string,
@@ -34,7 +84,7 @@ export async function processAdmsAttendance(
     if (!trimmed) continue;
 
     const parts = trimmed.split('\t');
-    if (parts.length < 4) continue;
+    if (parts.length < 4 || !parts[0] || !parts[1]) continue;
 
     const pin = parts[0];
     const timeStr = parts[1];
@@ -78,7 +128,7 @@ export async function processAdmsAttendance(
       eventHash,
     }).returning();
 
-    if (identity?.memberId) {
+    if (identity?.memberId && event) {
       try {
         const [member] = await db.select({ firstName: members.firstName, lastName: members.lastName }).from(members).where(eq(members.id, identity.memberId)).limit(1);
         
@@ -97,7 +147,7 @@ export async function processAdmsAttendance(
             const oneMinute = 60 * 1000;
             if (eventTime.getTime() - activeLog.checkInAt.getTime() > oneMinute) {
               await db.update(attendanceLogs)
-                .set({ checkOutAt: eventTime, checkOutMethod: 'BIOMETRIC' })
+                .set({ checkOutAt: eventTime, checkOutMethod: 'AUTO' })
                 .where(eq(attendanceLogs.id, activeLog.id));
               log.info({ memberId: identity.memberId, eventId: event.id }, 'Processed biometric check-out');
             }
@@ -132,6 +182,7 @@ export async function processAdmsAttendance(
     }
   }
 }
+
 // ADMS Commands Queue
 
 export async function processAdmsGetRequest(deviceSn: string) {
@@ -161,16 +212,36 @@ export async function processAdmsGetRequest(deviceSn: string) {
 
 export async function processAdmsDeviceCmd(deviceSn: string, payload: string) {
   // Payload format is usually "ID=ReturnCode" e.g. "ID=1&Return=0" or tab separated
-  // We'll parse it out roughly
   const params = new URLSearchParams(payload);
   const cmdId = params.get('ID');
   const returnCode = params.get('Return'); // usually 0 for success
 
   if (cmdId) {
-    const status = returnCode === '0' ? 'COMPLETED' : 'FAILED';
-    await db.update(biometricDeviceCommands)
+    const isSuccess = returnCode === '0';
+    const status = isSuccess ? 'COMPLETED' : 'FAILED';
+    
+    const [updatedCmd] = await db.update(biometricDeviceCommands)
       .set({ status, completedAt: new Date() })
-      .where(eq(biometricDeviceCommands.id, cmdId as any));
+      .where(eq(biometricDeviceCommands.id, cmdId as any))
+      .returning();
+
+    // If we can extract the PIN from the commandString, update biometricIdentities syncStatus
+    if (updatedCmd && updatedCmd.commandString) {
+      const pinMatch = updatedCmd.commandString.match(/PIN=(\w+)/);
+      if (pinMatch && pinMatch[1]) {
+        const pin = pinMatch[1];
+        await db.update(biometricIdentities)
+          .set({
+            syncStatus: isSuccess ? 'SYNCED' : 'FAILED',
+            lastSyncedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(and(
+            eq(biometricIdentities.deviceId, updatedCmd.deviceId),
+            eq(biometricIdentities.deviceUserId, pin)
+          ));
+      }
+    }
   }
 }
 
@@ -182,12 +253,24 @@ export async function listDevicesService(orgId: string) {
 
 export async function listIdentitiesService(orgId: string) {
   return db.select({
+    id: biometricIdentities.id,
     memberId: biometricIdentities.memberId,
+    memberName: sql<string>`concat(${members.firstName}, ' ', ${members.lastName})`.as('member_name'),
+    memberNumber: members.memberNumber,
+    memberStatus: members.status,
     deviceId: biometricIdentities.deviceId,
+    deviceName: biometricDevices.deviceName,
+    deviceSerial: biometricDevices.serialNumber,
     deviceUserId: biometricIdentities.deviceUserId,
+    accessGroup: biometricIdentities.accessGroup,
+    syncStatus: biometricIdentities.syncStatus,
+    lastSyncedAt: biometricIdentities.lastSyncedAt,
+    createdAt: biometricIdentities.createdAt,
   }).from(biometricIdentities)
     .innerJoin(members, eq(members.id, biometricIdentities.memberId))
-    .where(eq(members.organizationId, orgId));
+    .innerJoin(biometricDevices, eq(biometricDevices.id, biometricIdentities.deviceId))
+    .where(eq(members.organizationId, orgId))
+    .orderBy(desc(biometricIdentities.createdAt));
 }
 
 export async function registerDeviceService(orgId: string, data: { branchId: string; serialNumber: string; deviceName: string; deviceType?: string; purpose?: any }) {
@@ -208,56 +291,206 @@ export async function deleteDeviceService(orgId: string, deviceId: string) {
   return device;
 }
 
-// Manual or Auto Sync Member to Devices
-export async function syncMemberToBiometricsService(orgId: string, branchId: string, memberId: string, pin: string, name: string) {
-  // Find all access control devices for this branch
+/**
+ * Syncs a single member's access group (Group 1 for active, Group 99 for denied) across all their branch devices.
+ * Implements smart delta diffing: skips queuing duplicate commands if the device is already in the target group and SYNCED.
+ */
+export async function syncMemberBiometricAccessService(
+  orgId: string,
+  memberId: string,
+  options?: { force?: boolean; explicitPin?: string; explicitName?: string; explicitGroup?: number }
+) {
+  const [member] = await db.select({
+    id: members.id,
+    branchId: members.branchId,
+    memberNumber: members.memberNumber,
+    firstName: members.firstName,
+    lastName: members.lastName,
+    status: members.status,
+    deletedAt: members.deletedAt,
+  }).from(members).where(and(eq(members.id, memberId), eq(members.organizationId, orgId))).limit(1);
+
+  if (!member) {
+    throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
+  }
+
+  if (!member.branchId) {
+    log.debug({ memberId }, 'Member has no branch assigned, skipping biometric sync');
+    return { success: true, count: 0, reason: 'NO_BRANCH' };
+  }
+
+  // Find all biometric devices for this branch
   const devices = await db.select()
     .from(biometricDevices)
-    .where(eq(biometricDevices.branchId, branchId));
+    .where(eq(biometricDevices.branchId, member.branchId));
 
-  if (devices.length === 0) throw AppError.badRequest(ErrorCode.BAD_REQUEST, 'No biometric devices found for this branch');
+  if (devices.length === 0) {
+    log.debug({ memberId, branchId: member.branchId }, 'No biometric devices registered for member branch');
+    return { success: true, count: 0, reason: 'NO_DEVICES' };
+  }
 
-  for (const d of devices) {
+  const targetGroup = options?.explicitGroup !== undefined
+    ? options.explicitGroup
+    : await calculateMemberAccessGroup(orgId, memberId);
+
+  const pin = options?.explicitPin || member.memberNumber.replace(/\D/g, '') || member.id.slice(0, 8);
+  const name = options?.explicitName || `${member.firstName} ${member.lastName}`.trim().substring(0, 24);
+
+  let commandsQueued = 0;
+
+  for (const device of devices) {
+    // Check for conflict on this device with another member using the same PIN
     const [conflict] = await db.select().from(biometricIdentities)
       .where(and(
-        eq(biometricIdentities.deviceId, d.id),
+        eq(biometricIdentities.deviceId, device.id),
         eq(biometricIdentities.deviceUserId, pin),
         ne(biometricIdentities.memberId, memberId)
       )).limit(1);
-      
+
     if (conflict) {
-      throw AppError.badRequest(ErrorCode.BAD_REQUEST, `PIN ${pin} is already assigned to another member on device ${d.deviceName}. Each member must have a unique PIN.`);
+      log.warn({ memberId, pin, deviceName: device.deviceName }, 'PIN conflict detected on device');
+      throw AppError.badRequest(ErrorCode.BAD_REQUEST, `PIN ${pin} is already assigned to another member on device ${device.deviceName}.`);
     }
-  }
 
-  const commandsToInsert = devices.map(d => {
-    return {
-      organizationId: orgId,
-      deviceId: d.id,
-      deviceSerial: d.serialNumber,
-      // F09 ADMS DATA UPDATE format: DATA UPDATE USER PIN=1001 Name=John\tPrivilege=0
-      commandString: `DATA UPDATE USER PIN=${pin}\tName=${name}\tPrivilege=0`,
-      status: 'PENDING' as const,
-    };
-  });
+    const [existingIdentity] = await db.select()
+      .from(biometricIdentities)
+      .where(and(
+        eq(biometricIdentities.deviceId, device.id),
+        eq(biometricIdentities.memberId, memberId)
+      ))
+      .limit(1);
 
-  if (commandsToInsert.length > 0) {
-    await db.insert(biometricDeviceCommands).values(commandsToInsert);
-    
-    // Also store identity mappings if they don't exist
-    for (const d of devices) {
-      const [existing] = await db.select().from(biometricIdentities).where(and(eq(biometricIdentities.deviceId, d.id), eq(biometricIdentities.memberId, memberId))).limit(1);
-      if (!existing) {
-        await db.insert(biometricIdentities).values({
-          memberId,
-          deviceId: d.id,
-          deviceUserId: pin,
-        });
-      } else if (existing.deviceUserId !== pin) {
-        await db.update(biometricIdentities).set({ deviceUserId: pin }).where(eq(biometricIdentities.id, existing.id));
+    // Delta check: if already at target group and SYNCED, and no pending command, no change needed
+    if (!options?.force && existingIdentity && existingIdentity.accessGroup === targetGroup && existingIdentity.syncStatus === 'SYNCED' && existingIdentity.deviceUserId === pin) {
+      const [pendingCmd] = await db.select({ id: biometricDeviceCommands.id })
+        .from(biometricDeviceCommands)
+        .where(and(
+          eq(biometricDeviceCommands.deviceId, device.id),
+          eq(biometricDeviceCommands.status, 'PENDING'),
+          sql`${biometricDeviceCommands.commandString} LIKE ${`%PIN=${pin}%`}`
+        ))
+        .limit(1);
+
+      if (!pendingCmd) {
+        log.debug({ memberId, deviceId: device.id, targetGroup }, 'Biometric device already in target access group, skipping redundant command');
+        continue;
       }
     }
+
+    // Queue ADMS DATA UPDATE command: DATA UPDATE USER PIN=1001\tName=John Doe\tPri=0\tGrp=1 (or 99)
+    const commandString = `DATA UPDATE USER PIN=${pin}\tName=${name}\tPri=0\tGrp=${targetGroup}`;
+    await db.insert(biometricDeviceCommands).values({
+      organizationId: orgId,
+      deviceId: device.id,
+      deviceSerial: device.serialNumber,
+      commandString,
+      status: 'PENDING',
+    });
+
+    if (existingIdentity) {
+      await db.update(biometricIdentities)
+        .set({
+          deviceUserId: pin,
+          accessGroup: targetGroup,
+          syncStatus: 'PENDING',
+          updatedAt: new Date(),
+        })
+        .where(eq(biometricIdentities.id, existingIdentity.id));
+    } else {
+      await db.insert(biometricIdentities).values({
+        memberId,
+        deviceId: device.id,
+        deviceUserId: pin,
+        accessGroup: targetGroup,
+        syncStatus: 'PENDING',
+      });
+    }
+
+    commandsQueued++;
   }
 
-  return { success: true, count: commandsToInsert.length };
+  log.info({ memberId, targetGroup, commandsQueued }, 'Member biometric access synced');
+  return { success: true, targetGroup, count: commandsQueued };
+}
+
+/**
+ * Reconciles biometric access control for all members in the organization (or a specific branch).
+ * Evaluates each member's target group (1 vs 99), performs delta diffing, and queues updates for out-of-sync devices.
+ */
+export async function reconcileBiometricAccessService(orgId: string, branchId?: string | null) {
+  const branchConditions: any[] = [eq(biometricDevices.organizationId, orgId)];
+  if (branchId) branchConditions.push(eq(biometricDevices.branchId, branchId));
+
+  const devices = await db.select().from(biometricDevices).where(and(...branchConditions));
+  if (devices.length === 0) {
+    return {
+      totalMembersChecked: 0,
+      devicesCount: 0,
+      commandsQueued: 0,
+      group1ActiveCount: 0,
+      group99DeniedCount: 0,
+      alreadyInSyncCount: 0,
+    };
+  }
+
+  const memberConditions: any[] = [
+    eq(members.organizationId, orgId),
+    isNull(members.deletedAt),
+  ];
+  if (branchId) memberConditions.push(eq(members.branchId, branchId));
+
+  const allMembers = await db.select({
+    id: members.id,
+    branchId: members.branchId,
+    memberNumber: members.memberNumber,
+    firstName: members.firstName,
+    lastName: members.lastName,
+    status: members.status,
+  }).from(members).where(and(...memberConditions));
+
+  let totalMembersChecked = allMembers.length;
+  let commandsQueued = 0;
+  let group1ActiveCount = 0;
+  let group99DeniedCount = 0;
+  let alreadyInSyncCount = 0;
+
+  for (const m of allMembers) {
+    if (!m.branchId) continue;
+    const targetGroup = await calculateMemberAccessGroup(orgId, m.id);
+    if (targetGroup === 1) group1ActiveCount++;
+    else group99DeniedCount++;
+
+    const result = await syncMemberBiometricAccessService(orgId, m.id, { explicitGroup: targetGroup });
+    if (result.count > 0) {
+      commandsQueued += result.count;
+    } else {
+      alreadyInSyncCount++;
+    }
+  }
+
+  return {
+    totalMembersChecked,
+    devicesCount: devices.length,
+    commandsQueued,
+    group1ActiveCount,
+    group99DeniedCount,
+    alreadyInSyncCount,
+  };
+}
+
+// Manual Sync Member to Devices (UI invocation)
+export async function syncMemberToBiometricsService(
+  orgId: string,
+  branchId: string,
+  memberId: string,
+  pin: string,
+  name: string,
+  accessGroup?: number
+) {
+  return syncMemberBiometricAccessService(orgId, memberId, {
+    force: true,
+    explicitPin: pin,
+    explicitName: name,
+    explicitGroup: accessGroup,
+  });
 }

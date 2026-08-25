@@ -19,7 +19,7 @@ import * as path from 'path';
 import { config } from '../../config/env';
 import { sendTextMessage } from '../notifications/notifications.service';
 import { isAutoSyncBiometricsEnabled } from '../org/org.service';
-import { syncMemberToBiometricsService } from '../biometrics/biometrics.service';
+import { syncMemberToBiometricsService, syncMemberBiometricAccessService } from '../biometrics/biometrics.service';
 
 const log = createLogger('members-service');
 
@@ -317,14 +317,12 @@ export async function createMemberService(
   try {
     const autoSync = await isAutoSyncBiometricsEnabled(orgId);
     if (autoSync && member.branchId) {
-      // Use numeric part of memberNumber as PIN (e.g. GYM0001 -> 1)
-      const pin = member.memberNumber.replace(/\D/g, '');
-      const name = `${member.firstName} ${member.lastName}`.trim().substring(0, 24); // Device limits name length
-      await syncMemberToBiometricsService(orgId, member.branchId, member.id, pin || member.id.substring(0, 8), name);
-      log.info({ memberId: member.id, pin }, 'Auto-synced new member to biometrics');
+      syncMemberBiometricAccessService(orgId, member.id)
+        .catch(err => log.error({ err, memberId: member.id }, 'Failed to auto-sync biometrics for new member'));
+      log.info({ memberId: member.id }, 'Triggered auto-sync for new member to biometrics');
     }
   } catch (err) {
-    log.error({ err, memberId: member.id }, 'Failed to auto-sync biometrics');
+    log.error({ err, memberId: member.id }, 'Failed to check auto-sync biometrics');
   }
 
   return member;
@@ -447,6 +445,9 @@ export async function updateMemberStatusService(
     description: `Status changed to ${status}`,
   });
 
+  syncMemberBiometricAccessService(orgId, memberId)
+    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on member status change'));
+
   return updated;
 }
 
@@ -473,6 +474,9 @@ export async function deleteMemberService(
     entityId: memberId,
     description: 'Member soft-deleted',
   });
+
+  syncMemberBiometricAccessService(orgId, memberId, { explicitGroup: 99 })
+    .catch(err => log.error({ err, memberId }, 'Failed to revoke biometric access on member deletion'));
 
   return { success: true };
 }
