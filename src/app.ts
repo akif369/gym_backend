@@ -71,6 +71,15 @@ export async function buildApp() {
   // ── Global error handler ──────────────────────────────────────────────────────
   registerErrorHandler(fastify);
 
+  // ── Hardware & raw body content parser ──────────────────────────────────────
+  fastify.addContentTypeParser(
+    ['text/plain', 'text/html', 'application/x-www-form-urlencoded', 'application/octet-stream'],
+    { parseAs: 'string' },
+    (_req, body, done) => {
+      done(null, body);
+    }
+  );
+
   // ── Health (no auth, no prefix) ───────────────────────────────────────────────
   await fastify.register(healthRoutes);
 

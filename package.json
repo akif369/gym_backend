@@ -17,6 +17,7 @@
     "db:seed": "tsx src/db/seeds/seed.ts",
     "admin:bootstrap": "tsx src/scripts/bootstrap.ts",
     "admin:bootstrap:prod": "node dist/scripts/bootstrap.js",
+    "biometrics:test:user1": "tsx src/scripts/toggle-group.ts 1 1 99",
     "lint": "eslint src/",
     "format": "prettier --write \"src/**/*.ts\"",
     "test": "vitest run",

@@ -4,12 +4,16 @@ import { attendanceLogs } from '../../db/schema/attendance.schema';
 import { members } from '../../db/schema/members.schema';
 import { memberMemberships } from '../../db/schema/memberships.schema';
 import { organizations } from '../../db/schema/org.schema';
-import { eq, and, desc, asc, ne, isNull, sql } from 'drizzle-orm';
+import { eq, and, desc, asc, ne, isNull, sql, lt } from 'drizzle-orm';
 import { createLogger } from '../../common/logger/index';
 import crypto from 'crypto';
 import { AppError, ErrorCode } from '../../common/errors/AppError';
 
 const log = createLogger('biometrics-service');
+
+// ZKTeco F09 access groups used by GymFlow.
+export const BIOMETRIC_ACCESS_GROUP_ALLOWED = 1;
+export const BIOMETRIC_ACCESS_GROUP_DENIED = 99;
 
 export function currentDateInTimeZone(timeZone: string) {
   try {
@@ -40,7 +44,7 @@ export async function calculateMemberAccessGroup(orgId: string, memberId: string
     .limit(1);
 
   if (!member || member.deletedAt || member.status !== 'ACTIVE') {
-    return 99;
+    return BIOMETRIC_ACCESS_GROUP_DENIED;
   }
 
   const todayStr = currentDateInTimeZone(member.orgTimezone || 'Asia/Kolkata');
@@ -56,7 +60,7 @@ export async function calculateMemberAccessGroup(orgId: string, memberId: string
     ))
     .limit(1);
 
-  return activePlan ? 1 : 99;
+  return activePlan ? BIOMETRIC_ACCESS_GROUP_ALLOWED : BIOMETRIC_ACCESS_GROUP_DENIED;
 }
 
 export async function processAdmsAttendance(
@@ -185,61 +189,234 @@ export async function processAdmsAttendance(
 
 // ADMS Commands Queue
 
-export async function processAdmsGetRequest(deviceSn: string) {
-  const [device] = await db.select().from(biometricDevices).where(eq(biometricDevices.serialNumber, deviceSn)).limit(1);
-  if (!device) return 'OK';
+// Helper to get next ADMS numeric ID using a Postgres sequence
+async function getNextAdmsCommandId(): Promise<number> {
+  // Older installations may have applied the adms_command_id column migration
+  // before the sequence was added. Keep command delivery self-healing and safe
+  // for those databases; the migration also creates this sequence for new ones.
+  await db.execute(sql`
+    CREATE SEQUENCE IF NOT EXISTS biometric_adms_command_id_seq
+  `);
+  const result = await db.execute(sql`
+    SELECT nextval('biometric_adms_command_id_seq') AS id
+  `);
+  return Number((result as any[])[0]?.id);
+}
 
-  // Mark device online
-  await db.update(biometricDevices).set({ lastSeenAt: new Date(), status: 'ONLINE' }).where(eq(biometricDevices.id, device.id));
+export async function processAdmsGetRequest(
+  serialNumber: string
+): Promise<string> {
+  const sn = String(serialNumber).trim();
 
-  // Get oldest PENDING command
-  const [command] = await db.select()
+  console.log('\n========================================');
+  console.log('[ADMS GETREQUEST]');
+  console.log('Device SN:', sn);
+  console.log('========================================');
+
+  // Also update lastSeenAt to keep device ONLINE (added back for safety)
+  await db.update(biometricDevices)
+    .set({ lastSeenAt: new Date(), status: 'ONLINE', updatedAt: new Date() })
+    .where(eq(biometricDevices.serialNumber, sn));
+
+  // ----------------------------------------------------------
+  // 1. Find pending command for THIS exact device
+  // ----------------------------------------------------------
+
+  const [command] = await db
+    .select()
     .from(biometricDeviceCommands)
-    .where(and(eq(biometricDeviceCommands.deviceId, device.id), eq(biometricDeviceCommands.status, 'PENDING')))
-    .orderBy(asc(biometricDeviceCommands.createdAt))
+    .where(
+      and(
+        eq(
+          biometricDeviceCommands.deviceSerial,
+          sn
+        ),
+        eq(
+          biometricDeviceCommands.status,
+          'PENDING'
+        )
+      )
+    )
+    .orderBy(
+      asc(biometricDeviceCommands.createdAt)
+    )
     .limit(1);
 
-  if (!command) return 'OK';
+  if (!command) {
+    console.log(
+      `[ADMS GETREQUEST] No PENDING command for ${sn}`
+    );
 
-  // Mark as SENT
-  await db.update(biometricDeviceCommands)
-    .set({ status: 'SENT', sentAt: new Date() })
-    .where(eq(biometricDeviceCommands.id, command.id));
+    return 'OK';
+  }
 
-  // Return formatted command for ADMS: "C:<id>:<commandString>"
-  return `C:${command.id}:${command.commandString}`;
+  console.log(
+    '[ADMS GETREQUEST] Found command:',
+    command.id
+  );
+
+  console.log(
+    '[ADMS GETREQUEST] Command:',
+    command.commandString
+  );
+
+  // ----------------------------------------------------------
+  // 2. Generate numeric ADMS ID
+  // ----------------------------------------------------------
+
+  const admsCommandId = await getNextAdmsCommandId();
+
+  console.log(
+    '[ADMS GETREQUEST] ADMS ID:',
+    admsCommandId
+  );
+
+  // ----------------------------------------------------------
+  // 3. IMPORTANT:
+  // Update the command atomically.
+  // ----------------------------------------------------------
+
+  const [updated] = await db
+    .update(biometricDeviceCommands)
+    .set({
+      admsCommandId,
+      status: 'SENT',
+      sentAt: new Date(),
+    })
+    .where(
+      and(
+        eq(
+          biometricDeviceCommands.id,
+          command.id
+        ),
+        eq(
+          biometricDeviceCommands.status,
+          'PENDING'
+        )
+      )
+    )
+    .returning();
+
+  if (!updated) {
+    console.warn(
+      '[ADMS GETREQUEST] Command was already claimed.'
+    );
+
+    return 'OK';
+  }
+
+  // ----------------------------------------------------------
+  // 4. Build exact ZKTeco response
+  // ----------------------------------------------------------
+
+  const response =
+    `C:${admsCommandId}:${command.commandString}\n`;
+
+  console.log(
+    '[ADMS GETREQUEST] Sending:'
+  );
+
+  console.log(
+    JSON.stringify(response)
+  );
+
+  console.log(
+    '[ADMS GETREQUEST] DB UUID:',
+    command.id
+  );
+
+  console.log(
+    '[ADMS GETREQUEST] ADMS ID:',
+    admsCommandId
+  );
+
+  console.log(
+    '[ADMS GETREQUEST] Status: SENT'
+  );
+
+  return response;
 }
 
 export async function processAdmsDeviceCmd(deviceSn: string, payload: string) {
-  // Payload format is usually "ID=ReturnCode" e.g. "ID=1&Return=0" or tab separated
-  const params = new URLSearchParams(payload);
-  const cmdId = params.get('ID');
-  const returnCode = params.get('Return'); // usually 0 for success
+  log.info({ deviceSn, payload }, 'Received ADMS devicecmd payload');
+  if (!payload) return;
 
-  if (cmdId) {
-    const isSuccess = returnCode === '0';
-    const status = isSuccess ? 'COMPLETED' : 'FAILED';
-    
-    const [updatedCmd] = await db.update(biometricDeviceCommands)
-      .set({ status, completedAt: new Date() })
-      .where(eq(biometricDeviceCommands.id, cmdId as any))
-      .returning();
+  const lines = payload.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
 
-    // If we can extract the PIN from the commandString, update biometricIdentities syncStatus
-    if (updatedCmd && updatedCmd.commandString) {
-      const pinMatch = updatedCmd.commandString.match(/PIN=(\w+)/);
-      if (pinMatch && pinMatch[1]) {
-        const pin = pinMatch[1];
-        await db.update(biometricIdentities)
-          .set({
+    let cmdId: string | null = null;
+    let returnCode: string | null = null;
+
+    if (trimmed.includes('&')) {
+      const params = new URLSearchParams(trimmed);
+      cmdId = params.get('ID');
+      returnCode = params.get('Return');
+    } else if (trimmed.includes('=')) {
+      const parts = trimmed.split(/[\t\s]+/);
+      for (const part of parts) {
+        const [k, v] = part.split('=');
+        if (k === 'ID' && v) cmdId = v;
+        if (k === 'Return' && v) returnCode = v;
+      }
+    } else if (trimmed.includes(':')) {
+      const parts = trimmed.split(':');
+      if (parts[0] === 'ID' && parts[1]) cmdId = parts[1];
+    }
+
+    if (!cmdId) {
+      const idMatch = trimmed.match(/ID=([a-f0-9-]+)/i);
+      const retMatch = trimmed.match(/Return=(-?[0-9]+)/i);
+      if (idMatch && idMatch[1]) cmdId = idMatch[1];
+      if (retMatch && retMatch[1]) returnCode = retMatch[1];
+    }
+
+    if (cmdId) {
+      const isSuccess = returnCode === '0' || returnCode === null;
+      const status = isSuccess ? 'COMPLETED' : 'FAILED';
+      
+      const [device] = await db.select({ id: biometricDevices.id }).from(biometricDevices).where(eq(biometricDevices.serialNumber, deviceSn)).limit(1);
+      if (!device) continue;
+
+      const admsCommandId = Number(cmdId);
+      if (isNaN(admsCommandId)) {
+        log.warn({ cmdId }, 'Received non-numeric command ID from device');
+        continue;
+      }
+
+      const [updatedCmd] = await db.update(biometricDeviceCommands)
+        .set({ status, completedAt: new Date() })
+        .where(and(
+          eq(biometricDeviceCommands.admsCommandId, admsCommandId),
+          eq(biometricDeviceCommands.deviceId, device.id)
+        ))
+        .returning();
+
+      // If we can extract the PIN and Group from the commandString, update biometricIdentities
+      if (updatedCmd && updatedCmd.commandString) {
+        const pinMatch = updatedCmd.commandString.match(/PIN=(\w+)/i);
+        const grpMatch = updatedCmd.commandString.match(/Grp=(\d+)/i) || updatedCmd.commandString.match(/Group=(\d+)/i);
+        const targetGrp = grpMatch && grpMatch[1] ? parseInt(grpMatch[1], 10) : undefined;
+
+        if (pinMatch && pinMatch[1]) {
+          const pin = pinMatch[1];
+          const updateData: any = {
             syncStatus: isSuccess ? 'SYNCED' : 'FAILED',
             lastSyncedAt: new Date(),
             updatedAt: new Date(),
-          })
-          .where(and(
-            eq(biometricIdentities.deviceId, updatedCmd.deviceId),
-            eq(biometricIdentities.deviceUserId, pin)
-          ));
+          };
+          if (targetGrp !== undefined && isSuccess) {
+            updateData.accessGroup = targetGrp;
+          }
+
+          await db.update(biometricIdentities)
+            .set(updateData)
+            .where(and(
+              eq(biometricIdentities.deviceId, updatedCmd.deviceId),
+              eq(biometricIdentities.deviceUserId, pin)
+            ));
+        }
       }
     }
   }
@@ -252,25 +429,57 @@ export async function listDevicesService(orgId: string) {
 }
 
 export async function listIdentitiesService(orgId: string) {
-  return db.select({
+  const [org] = await db.select({ timezone: organizations.timezone }).from(organizations).where(eq(organizations.id, orgId)).limit(1);
+  const todayStr = currentDateInTimeZone(org?.timezone || 'Asia/Kolkata');
+
+  const rows = await db.select({
     id: biometricIdentities.id,
     memberId: biometricIdentities.memberId,
     memberName: sql<string>`concat(${members.firstName}, ' ', ${members.lastName})`.as('member_name'),
     memberNumber: members.memberNumber,
     memberStatus: members.status,
+    deletedAt: members.deletedAt,
     deviceId: biometricIdentities.deviceId,
     deviceName: biometricDevices.deviceName,
     deviceSerial: biometricDevices.serialNumber,
     deviceUserId: biometricIdentities.deviceUserId,
-    accessGroup: biometricIdentities.accessGroup,
+    storedAccessGroup: biometricIdentities.accessGroup,
     syncStatus: biometricIdentities.syncStatus,
     lastSyncedAt: biometricIdentities.lastSyncedAt,
     createdAt: biometricIdentities.createdAt,
+    hasActivePlan: sql<boolean>`EXISTS (
+      SELECT 1 FROM ${memberMemberships}
+      WHERE ${memberMemberships.memberId} = ${members.id}
+        AND ${memberMemberships.status} = 'ACTIVE'
+        AND ${memberMemberships.endDate} >= ${todayStr}
+    )`.as('has_active_plan'),
   }).from(biometricIdentities)
     .innerJoin(members, eq(members.id, biometricIdentities.memberId))
     .innerJoin(biometricDevices, eq(biometricDevices.id, biometricIdentities.deviceId))
     .where(eq(members.organizationId, orgId))
     .orderBy(desc(biometricIdentities.createdAt));
+
+  return rows.map(r => {
+    const isMemberActive = !r.deletedAt && r.memberStatus === 'ACTIVE' && r.hasActivePlan;
+    const computedGroup = isMemberActive
+      ? BIOMETRIC_ACCESS_GROUP_ALLOWED
+      : BIOMETRIC_ACCESS_GROUP_DENIED;
+    return {
+      id: r.id,
+      memberId: r.memberId,
+      memberName: r.memberName,
+      memberNumber: r.memberNumber,
+      memberStatus: r.memberStatus,
+      deviceId: r.deviceId,
+      deviceName: r.deviceName,
+      deviceSerial: r.deviceSerial,
+      deviceUserId: r.deviceUserId,
+      accessGroup: computedGroup, // Real-time calculated: 1 for active, 99 for expired/inactive
+      syncStatus: (r.storedAccessGroup !== computedGroup && r.syncStatus === 'SYNCED') ? 'PENDING' : r.syncStatus,
+      lastSyncedAt: r.lastSyncedAt,
+      createdAt: r.createdAt,
+    };
+  });
 }
 
 export async function registerDeviceService(orgId: string, data: { branchId: string; serialNumber: string; deviceName: string; deviceType?: string; purpose?: any }) {
@@ -329,9 +538,15 @@ export async function syncMemberBiometricAccessService(
     return { success: true, count: 0, reason: 'NO_DEVICES' };
   }
 
-  const targetGroup = options?.explicitGroup !== undefined
-    ? options.explicitGroup
-    : await calculateMemberAccessGroup(orgId, memberId);
+  // Always calculate the group from current membership state. An explicit
+  // group from a client could otherwise accidentally grant an inactive member
+  // access by sending Grp=1.
+  const calculatedGroup = await calculateMemberAccessGroup(orgId, memberId);
+  // A caller may explicitly revoke access, but may never explicitly grant
+  // group 1 to a member whose current state is not eligible.
+  const targetGroup = options?.explicitGroup === BIOMETRIC_ACCESS_GROUP_DENIED
+    ? BIOMETRIC_ACCESS_GROUP_DENIED
+    : calculatedGroup;
 
   const pin = options?.explicitPin || member.memberNumber.replace(/\D/g, '') || member.id.slice(0, 8);
   const name = options?.explicitName || `${member.firstName} ${member.lastName}`.trim().substring(0, 24);
@@ -377,8 +592,18 @@ export async function syncMemberBiometricAccessService(
       }
     }
 
-    // Queue ADMS DATA UPDATE command: DATA UPDATE USER PIN=1001\tName=John Doe\tPri=0\tGrp=1 (or 99)
-    const commandString = `DATA UPDATE USER PIN=${pin}\tName=${name}\tPri=0\tGrp=${targetGroup}`;
+    // Cancel / supersede old pending/sent commands for this pin on this device
+    await db.update(biometricDeviceCommands)
+      .set({ status: 'FAILED', completedAt: new Date() })
+      .where(and(
+        eq(biometricDeviceCommands.deviceId, device.id),
+        sql`${biometricDeviceCommands.status} IN ('PENDING', 'SENT')`,
+        sql`${biometricDeviceCommands.commandString} LIKE ${`%PIN=${pin}%`}`
+      ));
+
+    // F09 ADMS dialect. This is the format used by the working F09 toggle
+    // utility; this firmware rejects the shorter DATA UPDATE user / Group form.
+    const commandString = `DATA UPDATE USERINFO PIN=${pin}\tName=${name}\tPrivilege=0\tGrp=${targetGroup}`;
     await db.insert(biometricDeviceCommands).values({
       organizationId: orgId,
       deviceId: device.id,
@@ -435,7 +660,6 @@ export async function reconcileBiometricAccessService(orgId: string, branchId?: 
 
   const memberConditions: any[] = [
     eq(members.organizationId, orgId),
-    isNull(members.deletedAt),
   ];
   if (branchId) memberConditions.push(eq(members.branchId, branchId));
 
@@ -448,7 +672,7 @@ export async function reconcileBiometricAccessService(orgId: string, branchId?: 
     status: members.status,
   }).from(members).where(and(...memberConditions));
 
-  let totalMembersChecked = allMembers.length;
+  const totalMembersChecked = allMembers.length;
   let commandsQueued = 0;
   let group1ActiveCount = 0;
   let group99DeniedCount = 0;
@@ -460,6 +684,8 @@ export async function reconcileBiometricAccessService(orgId: string, branchId?: 
     if (targetGroup === 1) group1ActiveCount++;
     else group99DeniedCount++;
 
+    // Reconciliation is idempotent. Only queue when the device is not already
+    // confirmed in the calculated target group.
     const result = await syncMemberBiometricAccessService(orgId, m.id, { explicitGroup: targetGroup });
     if (result.count > 0) {
       commandsQueued += result.count;

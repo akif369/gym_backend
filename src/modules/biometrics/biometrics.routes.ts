@@ -15,6 +15,23 @@ import {
 import { requireAuth } from '../../common/auth/requireAuth';
 
 export async function biometricsAdmsRoutes(app: FastifyInstance) {
+  // --- TEMPORARY DIAGNOSTIC LOGGING ---
+  app.addHook('onRequest', async (req) => {
+    if (req.url.includes('/iclock/')) {
+      console.log('\n');
+      console.log('==============================================');
+      console.log('🔥 ZKTECO RAW HTTP REQUEST');
+      console.log('==============================================');
+      console.log('METHOD:', req.method);
+      console.log('URL:', req.url);
+      console.log('QUERY:', req.query);
+      console.log('CONTENT-TYPE:', req.headers['content-type']);
+      console.log('USER-AGENT:', req.headers['user-agent']);
+      console.log('==============================================');
+    }
+  });
+  // ------------------------------------
+
   // ADMS routes must NOT have requireAuth, because devices use their own protocol
   // Depending on device settings, these could be at root or under /iclock
   

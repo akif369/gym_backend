@@ -117,6 +117,7 @@ export const biometricIdentities = pgTable('biometric_identities', {
 
 export const biometricDeviceCommands = pgTable('biometric_device_commands', {
   id: uuid('id').primaryKey().defaultRandom(),
+  admsCommandId: integer('adms_command_id').unique(),
   organizationId: uuid('organization_id')
     .notNull()
     .references(() => organizations.id, { onDelete: 'cascade' }),
@@ -124,7 +125,7 @@ export const biometricDeviceCommands = pgTable('biometric_device_commands', {
     .notNull()
     .references(() => biometricDevices.id, { onDelete: 'cascade' }),
   deviceSerial: text('device_serial').notNull(),
-  commandString: text('command_string').notNull(), // e.g. 'C:1:DATA UPDATE USER PIN=1001 Name=John'
+  commandString: text('command_string').notNull(), // e.g. 'DATA UPDATE USER PIN=1001 Name=John'
   status: biometricCommandStatusEnum('status').default('PENDING').notNull(),
   sentAt: timestamp('sent_at', { withTimezone: true }),
   completedAt: timestamp('completed_at', { withTimezone: true }),

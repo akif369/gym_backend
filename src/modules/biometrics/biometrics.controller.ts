@@ -12,8 +12,8 @@ import {
   reconcileBiometricAccessService,
 } from './biometrics.service';
 import { db } from '../../db/index';
-import { biometricDevices } from '../../db/schema/biometrics.schema';
-import { eq } from 'drizzle-orm';
+import { biometricDevices, biometricDeviceCommands } from '../../db/schema/biometrics.schema';
+import { and, eq } from 'drizzle-orm';
 import { createLogger } from '../../common/logger/index';
 
 const log = createLogger('biometrics-controller');
@@ -59,24 +59,319 @@ export async function admsCdata(req: FastifyRequest, reply: FastifyReply) {
   return reply.send('OK\n');
 }
 
-export async function admsGetRequest(req: FastifyRequest, reply: FastifyReply) {
-  const sn = (req.query as any).SN;
+export async function admsGetRequest(
+  req: FastifyRequest,
+  reply: FastifyReply
+) {
+  console.log('\n');
+  console.log('########################################');
+  console.log('### F09 GETREQUEST RECEIVED');
+  console.log('########################################');
+
+  console.log('Method:', req.method);
+  console.log('URL:', req.url);
+  console.log('Query:', req.query);
+  console.log('Headers:', req.headers);
+  console.log('Body:', req.body);
+
+  const query =
+    (req.query as Record<string, any>) ?? {};
+
+  const sn = String(
+    query.SN ??
+    query.sn ??
+    ''
+  ).trim();
+
+  console.log('Extracted SN:', JSON.stringify(sn));
+
   if (!sn) {
-    return reply.status(400).send('OK');
+    console.error(
+      '❌ GETREQUEST HAS NO SERIAL NUMBER'
+    );
+
+    return reply
+      .type('text/plain')
+      .send('OK\n');
   }
-  const cmd = await processAdmsGetRequest(sn);
-  reply.header('Content-Type', 'text/plain');
-  return reply.send(cmd + '\n');
+
+  console.log(
+    'Calling processAdmsGetRequest()...'
+  );
+
+  const response =
+    await processAdmsGetRequest(sn);
+
+  console.log(
+    'processAdmsGetRequest response:',
+    JSON.stringify(response)
+  );
+
+  console.log(
+    '########################################'
+  );
+  console.log(
+    '### END GETREQUEST'
+  );
+  console.log(
+    '########################################\n'
+  );
+
+  return reply
+    .type('text/plain')
+    .send(response);
 }
 
-export async function admsDeviceCmd(req: FastifyRequest, reply: FastifyReply) {
-  const sn = (req.query as any).SN;
-  const payload = req.body as string;
-  if (sn && payload) {
-    await processAdmsDeviceCmd(sn, payload);
+export async function admsDeviceCmd(
+  req: FastifyRequest,
+  reply: FastifyReply
+) {
+  console.log('\n');
+  console.log('##############################################');
+  console.log('🔥 /iclock/devicecmd HIT');
+  console.log('##############################################');
+  console.log('METHOD:', req.method);
+  console.log('URL:', req.url);
+  console.log('QUERY:', req.query);
+  console.log('HEADERS:', req.headers);
+  console.log('BODY:', req.body);
+
+  const query = (req.query as Record<string, unknown>) ?? {};
+  const sn = String(
+    query.SN ?? ''
+  ).trim();
+
+  console.log('SN:', sn);
+
+  /*
+   * Fastify may parse application/x-www-form-urlencoded
+   * into an object.
+   */
+  let raw = '';
+  if (typeof req.body === 'string') {
+    raw = req.body;
+  } else if (Buffer.isBuffer(req.body)) {
+    raw = req.body.toString('utf8');
+  } else if (
+    req.body && typeof req.body === 'object'
+  ) {
+    const body = req.body as Record<string, unknown>;
+    raw = Object.entries(body)
+      .map(
+        ([key, value]) =>
+          `${key}=${encodeURIComponent(
+            String(value ?? '')
+          )}`
+      )
+      .join('&');
   }
-  reply.header('Content-Type', 'text/plain');
-  return reply.send('OK\n');
+
+  console.log('RAW DEVICECMD BODY:');
+  console.log(JSON.stringify(raw));
+
+  /*
+   * Some firmware may put values in the query.
+   */
+  if (!raw) {
+    raw = Object.entries(query)
+      .filter(([key]) => key !== 'SN')
+      .map(
+        ([key, value]) =>
+          `${key}=${encodeURIComponent(
+            String(value ?? '')
+          )}`
+      )
+      .join('&');
+  }
+
+  console.log(
+    'FINAL DEVICECMD PAYLOAD:',
+    JSON.stringify(raw)
+  );
+
+  // Use the shared ADMS acknowledgement handler so successful commands also
+  // mark the identity SYNCED and persist the confirmed access group.
+  await processAdmsDeviceCmd(sn, raw);
+  return reply
+    .type('text/plain')
+    .send('OK\n');
+
+  /*
+   * Parse ID / Return / CMD.
+   *
+   * IMPORTANT:
+   * ZKTeco uses Return with either capitalization
+   * depending on firmware.
+   */
+  const params = new URLSearchParams(
+    raw
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .replace(/\n/g, '&')
+  );
+
+  const idValue = params.get('ID');
+  const returnValue = params.get('Return') ?? params.get('return');
+  const cmdValue = params.get('CMD') ?? params.get('cmd');
+
+  console.log('PARSED DEVICECMD:');
+  console.log({
+    SN: sn,
+    ID: idValue,
+    Return: returnValue,
+    CMD: cmdValue,
+  });
+
+  if (!sn) {
+    console.error(
+      '❌ DEVICECMD: missing SN'
+    );
+    return reply
+      .type('text/plain')
+      .send('OK\n');
+  }
+
+  if (!idValue) {
+    console.error(
+      '❌ DEVICECMD: missing ID'
+    );
+    return reply
+      .type('text/plain')
+      .send('OK\n');
+  }
+
+  const admsCommandId = Number(idValue);
+  const returnCode = Number(
+    returnValue ?? -999
+  );
+
+  console.log(
+    'ADMS COMMAND ID:',
+    admsCommandId
+  );
+  console.log(
+    'RETURN CODE:',
+    returnCode
+  );
+
+  /*
+   * Find exact command.
+   */
+  const [command] = await db
+    .select()
+    .from(
+      biometricDeviceCommands
+    )
+    .where(
+      and(
+        eq(
+          biometricDeviceCommands.admsCommandId,
+          admsCommandId
+        ),
+        eq(
+          biometricDeviceCommands.deviceSerial,
+          sn
+        )
+      )
+    )
+    .limit(1);
+
+  if (!command) {
+    console.error(
+      '❌ DEVICECMD: command NOT FOUND'
+    );
+    console.error({
+      sn,
+      admsCommandId,
+      returnCode,
+      cmdValue,
+    });
+
+    /*
+     * VERY useful diagnostic:
+     */
+    const [byId] = await db
+      .select()
+      .from(
+        biometricDeviceCommands
+      )
+      .where(
+        eq(
+          biometricDeviceCommands.admsCommandId,
+          admsCommandId
+        )
+      )
+      .limit(1);
+    console.error(
+      'Found by ADMS ID only:',
+      byId
+    );
+
+    return reply
+      .type('text/plain')
+      .send('OK\n');
+  }
+
+  // TypeScript cannot infer narrowing through Fastify's reply object above.
+  if (!command) throw new Error('ADMS command disappeared after lookup');
+
+  console.log(
+    '✓ MATCHED COMMAND:',
+    command!.id
+  );
+  console.log(
+    'Original command:',
+    command!.commandString
+  );
+
+  /*
+   * Return 0 = SUCCESS
+   */
+  if (returnCode === 0) {
+    await db
+      .update(
+        biometricDeviceCommands
+      )
+      .set({
+        status: 'COMPLETED',
+        completedAt: new Date(),
+      })
+      .where(
+        eq(
+          biometricDeviceCommands.id,
+          command!.id
+        )
+      );
+    console.log(
+      '🎉 COMMAND COMPLETED'
+    );
+  } else {
+    await db
+      .update(
+        biometricDeviceCommands
+      )
+      .set({
+        status: 'FAILED',
+        completedAt: new Date(),
+      })
+      .where(
+        eq(
+          biometricDeviceCommands.id,
+          command!.id
+        )
+      );
+    console.error(
+      '❌ DEVICE REPORTED FAILURE'
+    );
+    console.error(
+      'Return code:',
+      returnCode
+    );
+  }
+
+  return reply
+    .type('text/plain')
+    .send('OK\n');
 }
 
 // --- API Endpoints for UI ---

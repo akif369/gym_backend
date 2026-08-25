@@ -1,0 +1,2 @@
+ALTER TABLE "biometric_device_commands" ADD COLUMN "adms_command_id" integer;--> statement-breakpoint
+ALTER TABLE "biometric_device_commands" ADD CONSTRAINT "biometric_device_commands_adms_command_id_unique" UNIQUE("adms_command_id");

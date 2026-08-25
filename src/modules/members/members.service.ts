@@ -423,7 +423,7 @@ export async function updateMemberStatusService(
   status: string,
   actorId: string,
 ) {
-  const allowedStatuses = ['ACTIVE', 'FROZEN', 'EXPIRED', 'ARCHIVED'] as const;
+  const allowedStatuses = ['ACTIVE', 'INACTIVE', 'FROZEN', 'EXPIRED', 'ARCHIVED'] as const;
   if (!allowedStatuses.includes(status as (typeof allowedStatuses)[number])) {
     throw AppError.badRequest(ErrorCode.BAD_REQUEST, `Unsupported member status: ${status}`);
   }
