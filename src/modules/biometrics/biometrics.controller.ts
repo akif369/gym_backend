@@ -10,6 +10,7 @@ import {
   syncMemberToBiometricsService,
   syncMemberBiometricAccessService,
   reconcileBiometricAccessService,
+  deleteBiometricIdentityService,
 } from './biometrics.service';
 import { db } from '../../db/index';
 import { biometricDevices, biometricDeviceCommands } from '../../db/schema/biometrics.schema';
@@ -399,6 +400,13 @@ export async function deleteDevice(req: FastifyRequest, reply: FastifyReply) {
   const orgId = req.user.orgId;
   const { deviceId } = req.params as any;
   await deleteDeviceService(orgId, deviceId);
+  return reply.status(204).send();
+}
+
+export async function deleteIdentity(req: FastifyRequest, reply: FastifyReply) {
+  const orgId = req.user.orgId;
+  const { identityId } = req.params as any;
+  await deleteBiometricIdentityService(orgId, identityId);
   return reply.status(204).send();
 }
 

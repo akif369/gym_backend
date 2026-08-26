@@ -11,6 +11,7 @@ import {
   syncMemberToDevice,
   syncMemberAccess,
   reconcileBiometrics,
+  deleteIdentity,
 } from './biometrics.controller';
 import { requireAuth } from '../../common/auth/requireAuth';
 
@@ -53,6 +54,7 @@ export async function biometricsApiRoutes(app: FastifyInstance) {
   app.get('/identities', listIdentities);
   app.post('/', registerDevice);
   app.delete('/:deviceId', deleteDevice);
+  app.delete('/identities/:identityId', deleteIdentity);
   app.post('/sync', syncMemberToDevice);
   app.post('/sync-member/:memberId', syncMemberAccess);
   app.post('/reconcile', reconcileBiometrics);

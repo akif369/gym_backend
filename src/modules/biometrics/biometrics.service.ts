@@ -460,10 +460,6 @@ export async function listIdentitiesService(orgId: string) {
     .orderBy(desc(biometricIdentities.createdAt));
 
   return rows.map(r => {
-    const isMemberActive = !r.deletedAt && r.memberStatus === 'ACTIVE' && r.hasActivePlan;
-    const computedGroup = isMemberActive
-      ? BIOMETRIC_ACCESS_GROUP_ALLOWED
-      : BIOMETRIC_ACCESS_GROUP_DENIED;
     return {
       id: r.id,
       memberId: r.memberId,
@@ -474,8 +470,8 @@ export async function listIdentitiesService(orgId: string) {
       deviceName: r.deviceName,
       deviceSerial: r.deviceSerial,
       deviceUserId: r.deviceUserId,
-      accessGroup: computedGroup, // Real-time calculated: 1 for active, 99 for expired/inactive
-      syncStatus: (r.storedAccessGroup !== computedGroup && r.syncStatus === 'SYNCED') ? 'PENDING' : r.syncStatus,
+      accessGroup: r.storedAccessGroup,
+      syncStatus: r.syncStatus,
       lastSyncedAt: r.lastSyncedAt,
       createdAt: r.createdAt,
     };
@@ -507,7 +503,7 @@ export async function deleteDeviceService(orgId: string, deviceId: string) {
 export async function syncMemberBiometricAccessService(
   orgId: string,
   memberId: string,
-  options?: { force?: boolean; explicitPin?: string; explicitName?: string; explicitGroup?: number }
+  options?: { force?: boolean; explicitPin?: string; explicitName?: string; explicitGroup?: number; explicitBranchId?: string }
 ) {
   const [member] = await db.select({
     id: members.id,
@@ -523,7 +519,9 @@ export async function syncMemberBiometricAccessService(
     throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
   }
 
-  if (!member.branchId) {
+  const effectiveBranchId = options?.explicitBranchId || member.branchId;
+
+  if (!effectiveBranchId) {
     log.debug({ memberId }, 'Member has no branch assigned, skipping biometric sync');
     return { success: true, count: 0, reason: 'NO_BRANCH' };
   }
@@ -531,21 +529,16 @@ export async function syncMemberBiometricAccessService(
   // Find all biometric devices for this branch
   const devices = await db.select()
     .from(biometricDevices)
-    .where(eq(biometricDevices.branchId, member.branchId));
+    .where(eq(biometricDevices.branchId, effectiveBranchId));
 
   if (devices.length === 0) {
     log.debug({ memberId, branchId: member.branchId }, 'No biometric devices registered for member branch');
     return { success: true, count: 0, reason: 'NO_DEVICES' };
   }
 
-  // Always calculate the group from current membership state. An explicit
-  // group from a client could otherwise accidentally grant an inactive member
-  // access by sending Grp=1.
   const calculatedGroup = await calculateMemberAccessGroup(orgId, memberId);
-  // A caller may explicitly revoke access, but may never explicitly grant
-  // group 1 to a member whose current state is not eligible.
-  const targetGroup = options?.explicitGroup === BIOMETRIC_ACCESS_GROUP_DENIED
-    ? BIOMETRIC_ACCESS_GROUP_DENIED
+  const targetGroup = options?.explicitGroup !== undefined
+    ? options.explicitGroup
     : calculatedGroup;
 
   const pin = options?.explicitPin || member.memberNumber.replace(/\D/g, '') || member.id.slice(0, 8);
@@ -718,5 +711,27 @@ export async function syncMemberToBiometricsService(
     explicitPin: pin,
     explicitName: name,
     explicitGroup: accessGroup,
+    explicitBranchId: branchId,
   });
+}
+
+export async function deleteBiometricIdentityService(orgId: string, identityId: string) {
+  const [identity] = await db.select().from(biometricIdentities).where(eq(biometricIdentities.id, identityId)).limit(1);
+  if (!identity) throw AppError.notFound(ErrorCode.NOT_FOUND, 'Identity not found');
+
+  const [device] = await db.select().from(biometricDevices).where(and(eq(biometricDevices.id, identity.deviceId), eq(biometricDevices.organizationId, orgId))).limit(1);
+  if (!device) throw AppError.notFound(ErrorCode.NOT_FOUND, 'Device not found');
+
+  // Queue a command to delete the user from the physical device
+  await db.insert(biometricDeviceCommands).values({
+    organizationId: orgId,
+    deviceId: device.id,
+    deviceSerial: device.serialNumber,
+    commandString: `DATA DELETE USERINFO PIN=${identity.deviceUserId}`,
+    status: 'PENDING',
+  });
+
+  // Delete the local identity mapping
+  await db.delete(biometricIdentities).where(eq(biometricIdentities.id, identityId));
+  return { success: true };
 }

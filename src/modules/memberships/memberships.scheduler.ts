@@ -19,6 +19,9 @@ export function startMembershipExpiryScheduler() {
       // Repair missed events and reconcile all existing identities. The
       // reconciliation service uses delta checks, so already-confirmed users
       // do not generate duplicate commands.
+      // 
+      // DISABLED: User explicitly requested to disable automatic sync for now
+      /*
       const orgs = await db.select({ id: organizations.id }).from(organizations);
       for (const org of orgs) {
         const syncResult = await reconcileBiometricAccessService(org.id);
@@ -26,6 +29,7 @@ export function startMembershipExpiryScheduler() {
           log.info({ organizationId: org.id, ...syncResult }, 'Biometric access reconciliation queued updates');
         }
       }
+      */
     } catch (error) {
       log.error({ err: error }, 'Membership expiry sweep failed');
     }
