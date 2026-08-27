@@ -245,6 +245,9 @@ export async function createMemberService(
     notes?: string;
     emergency?: { name: string; phone: string; relation: string };
     health?: { medicalConditions?: string; allergies?: string; injuries?: string; bloodGroup?: string };
+    syncToDevice?: boolean;
+    pin?: string;
+    accessGroup?: number;
   },
   actorId: string,
 ) {
@@ -318,18 +321,32 @@ export async function createMemberService(
     log.error({ err, memberId: member.id }, 'Failed to initiate welcome message');
   }
 
+  let syncError: string | undefined;
   try {
-    const autoSync = await isAutoSyncBiometricsEnabled(orgId);
+    const autoSync = data.syncToDevice ?? await isAutoSyncBiometricsEnabled(orgId);
     if (autoSync && member.branchId) {
-      syncMemberBiometricAccessService(orgId, member.id)
-        .catch(err => log.error({ err, memberId: member.id }, 'Failed to auto-sync biometrics for new member'));
-      log.info({ memberId: member.id }, 'Triggered auto-sync for new member to biometrics');
+      const pin = data.pin || member.memberNumber.replace(/\D/g, '') || member.id.slice(0, 8);
+      const name = `${member.firstName} ${member.lastName}`.trim().substring(0, 24);
+      
+      try {
+        await syncMemberBiometricAccessService(orgId, member.id, {
+          force: true,
+          explicitPin: pin,
+          explicitName: name,
+          explicitGroup: data.accessGroup ?? 1
+        });
+        log.info({ memberId: member.id }, 'Triggered auto-sync for new member to biometrics');
+      } catch (err: any) {
+        log.error({ err, memberId: member.id }, 'Failed to auto-sync biometrics for new member');
+        syncError = err.message || 'Unknown error occurred during sync';
+      }
     }
-  } catch (err) {
+  } catch (err: any) {
     log.error({ err, memberId: member.id }, 'Failed to check auto-sync biometrics');
+    syncError = err.message || 'Failed to initialize biometric sync';
   }
 
-  return member;
+  return { ...member, syncError };
 }
 
 // ── Get Member ────────────────────────────────────────────────────────────────
