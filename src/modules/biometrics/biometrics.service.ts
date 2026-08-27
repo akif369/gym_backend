@@ -4,7 +4,7 @@ import { attendanceLogs } from '../../db/schema/attendance.schema';
 import { members } from '../../db/schema/members.schema';
 import { memberMemberships } from '../../db/schema/memberships.schema';
 import { organizations } from '../../db/schema/org.schema';
-import { eq, and, desc, asc, ne, isNull, sql, lt } from 'drizzle-orm';
+import { eq, and, desc, asc, ne, isNull, sql, lt, inArray } from 'drizzle-orm';
 import { createLogger } from '../../common/logger/index';
 import crypto from 'crypto';
 import { AppError, ErrorCode } from '../../common/errors/AppError';
@@ -494,18 +494,29 @@ export async function syncMemberBiometricAccessService(
 
   const effectiveBranchId = options?.explicitBranchId || member.branchId;
 
-  if (!effectiveBranchId) {
-    log.debug({ memberId }, 'Member has no branch assigned, skipping biometric sync');
-    return { success: true, count: 0, reason: 'NO_BRANCH' };
-  }
-
-  // Find all biometric devices for this branch
-  const devices = await db.select()
+  // Find devices from the effective branch
+  const branchDevices = effectiveBranchId ? await db.select()
     .from(biometricDevices)
-    .where(eq(biometricDevices.branchId, effectiveBranchId));
+    .where(eq(biometricDevices.branchId, effectiveBranchId)) : [];
+
+  // Find devices where the member already has an identity (to ensure cross-branch identities are kept in sync)
+  const existingIdentityRecords = await db.select({ deviceId: biometricIdentities.deviceId })
+    .from(biometricIdentities)
+    .where(eq(biometricIdentities.memberId, memberId));
+    
+  const existingDeviceIds = existingIdentityRecords.map(id => id.deviceId);
+  const additionalDevices = existingDeviceIds.length > 0 ? await db.select()
+    .from(biometricDevices)
+    .where(inArray(biometricDevices.id, existingDeviceIds)) : [];
+
+  // Merge and deduplicate devices
+  const deviceMap = new Map<string, typeof branchDevices[0]>();
+  for (const d of branchDevices) deviceMap.set(d.id, d);
+  for (const d of additionalDevices) deviceMap.set(d.id, d);
+  const devices = Array.from(deviceMap.values());
 
   if (devices.length === 0) {
-    log.debug({ memberId, branchId: member.branchId }, 'No biometric devices registered for member branch');
+    log.debug({ memberId }, 'No biometric devices found for member to sync');
     return { success: true, count: 0, reason: 'NO_DEVICES' };
   }
 
