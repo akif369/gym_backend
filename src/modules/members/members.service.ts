@@ -1,6 +1,6 @@
 import { db } from '../../db/index';
 import {
-  members, memberEmergencyContacts, memberHealthProfiles, memberMeasurements,
+  members, memberEmergencyContacts, memberHealthProfiles, memberMeasurements, organizations
 } from '../../db/schema/index';
 import { trainers, trainerAssignments } from '../../db/schema/trainers.schema';
 import { memberMemberships } from '../../db/schema/memberships.schema';
