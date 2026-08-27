@@ -13,4 +13,4 @@ animated icons animateicon.
 staff edit permission
 
 
-admin , owner can delete branch , organsisation
+admin , owner can delete branch , organsisation imlement on admin-webapp

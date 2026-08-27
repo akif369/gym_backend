@@ -1,5 +1,5 @@
 import { db } from '../../db/index';
-import { members, memberEmergencyContacts, memberHealthProfiles, memberMeasurements, organizations, users, userSessions } from '../../db/schema/index';
+import { members, memberEmergencyContacts, memberHealthProfiles, memberMeasurements, organizations, users, userSessions, biometricIdentities } from '../../db/schema/index';
 import { trainers, trainerAssignments } from '../../db/schema/trainers.schema';
 import { memberMemberships } from '../../db/schema/memberships.schema';
 import { invoices } from '../../db/schema/payments.schema';
@@ -18,7 +18,7 @@ import * as path from 'path';
 import { config } from '../../config/env';
 import { sendTextMessage } from '../notifications/notifications.service';
 import { isAutoSyncBiometricsEnabled } from '../org/org.service';
-import { syncMemberToBiometricsService, syncMemberBiometricAccessService } from '../biometrics/biometrics.service';
+import { syncMemberToBiometricsService, deleteBiometricIdentityService, syncMemberBiometricAccessService } from '../biometrics/biometrics.service';
 
 const log = createLogger('members-service');
 
@@ -450,7 +450,7 @@ export async function updateMemberStatusService(
   });
 
   syncMemberBiometricAccessService(orgId, memberId)
-    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on member status change'));
+    .catch((err: any) => log.error({ err, memberId }, 'Failed to sync biometric access after status change'));
 
   return updated;
 }
@@ -493,8 +493,20 @@ export async function deleteMemberService(
     log.error({ err, memberId }, 'Failed to revoke user sessions on member deletion');
   }
 
-  syncMemberBiometricAccessService(orgId, memberId, { explicitGroup: 99 })
-    .catch(err => log.error({ err, memberId }, 'Failed to revoke biometric access on member deletion'));
+  // Completely remove from biometric devices
+  try {
+    const identities = await db.select({ id: biometricIdentities.id })
+      .from(biometricIdentities)
+      .where(eq(biometricIdentities.memberId, memberId));
+    
+    for (const identity of identities) {
+      await deleteBiometricIdentityService(orgId, identity.id).catch(err => {
+        log.error({ err, memberId, identityId: identity.id }, 'Failed to delete biometric identity on device');
+      });
+    }
+  } catch (err) {
+    log.error({ err, memberId }, 'Failed to process biometric identity deletion');
+  }
 
   return updated;
 }
@@ -506,6 +518,21 @@ export async function hardDeleteMemberService(
   memberId: string,
   actorId: string,
 ) {
+  // Completely remove from biometric devices before hard delete (cascade will remove local mappings but not physical devices)
+  try {
+    const identities = await db.select({ id: biometricIdentities.id })
+      .from(biometricIdentities)
+      .where(eq(biometricIdentities.memberId, memberId));
+    
+    for (const identity of identities) {
+      await deleteBiometricIdentityService(orgId, identity.id).catch(err => {
+        log.error({ err, memberId, identityId: identity.id }, 'Failed to delete biometric identity on device during hard delete');
+      });
+    }
+  } catch (err) {
+    log.error({ err, memberId }, 'Failed to process biometric identity deletion during hard delete');
+  }
+
   const [deleted] = await db
     .delete(members)
     .where(and(eq(members.id, memberId), eq(members.organizationId, orgId)))
