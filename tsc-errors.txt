@@ -10,3 +10,7 @@ device always oneline fix (setting.page.hardware):
 
 animated icons animateicon.
 
+staff edit permission
+
+
+admin , owner can delete branch , organsisation

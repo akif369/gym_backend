@@ -6,9 +6,12 @@ import {
   getMemberHealthProfileService, updateMemberHealthProfileService,
   uploadMemberPhotoService, deleteMemberPhotoService,
   getMemberAccessStatusService,
+  getMemberDeletionSummaryService, hardDeleteMemberService,
 } from './members.service';
 import { db } from '../../db/index';
-import { memberships, membershipPlans } from '../../db/schema/memberships.schema';
+import { membershipPlans } from '../../db/schema/memberships.schema';
+import { members } from '../../db/schema/members.schema';
+import { users } from '../../db/schema/auth.schema';
 import { eq, and } from 'drizzle-orm';
 import { AppError } from '../../common/errors/AppError';
 import { isStrictPaymentPolicyEnabled } from '../org/org.service';
@@ -48,9 +51,20 @@ export const membersController = {
     return reply.send({ member });
   },
 
-  async delete(request: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
-    const result = await deleteMemberService(request.user.orgId, request.params.memberId, request.user.userId);
+  async delete(request: FastifyRequest<{ Params: { memberId: string }, Body: { deletionReason?: string } }>, reply: FastifyReply) {
+    const { deletionReason } = request.body || {};
+    const result = await deleteMemberService(request.user.orgId, request.params.memberId, request.user.userId, deletionReason);
     return reply.send(result);
+  },
+
+  async hardDelete(request: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
+    const result = await hardDeleteMemberService(request.user.orgId, request.params.memberId, request.user.userId);
+    return reply.send(result);
+  },
+
+  async getDeletionSummary(request: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
+    const summary = await getMemberDeletionSummaryService(request.user.orgId, request.params.memberId);
+    return reply.send(summary);
   },
 
   async getActivity(request: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
@@ -64,29 +78,25 @@ export const membersController = {
   },
 
   async addMeasurement(request: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
-    const measurement = await addMemberMeasurementService(
-      request.user.orgId, request.params.memberId, request.body as any, request.user.userId,
-    );
+    const measurement = await addMemberMeasurementService(request.user.orgId, request.params.memberId, request.body as any, request.user.userId);
     return reply.status(201).send({ measurement });
   },
 
   async getHealthProfile(request: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
-    const health = await getMemberHealthProfileService(request.user.orgId, request.params.memberId);
-    return reply.send({ health });
+    const profile = await getMemberHealthProfileService(request.user.orgId, request.params.memberId);
+    return reply.send({ profile });
   },
 
   async updateHealthProfile(request: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
-    const health = await updateMemberHealthProfileService(request.user.orgId, request.params.memberId, request.body as any, request.user.userId);
-    return reply.send({ health });
+    const profile = await updateMemberHealthProfileService(request.user.orgId, request.params.memberId, request.body as any, request.user.userId);
+    return reply.send({ profile });
   },
 
   async uploadPhoto(request: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
     const data = await request.file();
-    if (!data) throw new Error('No file uploaded');
+    if (!data) throw AppError.badRequest('BAD_REQUEST', 'No file uploaded');
     const buffer = await data.toBuffer();
-    const result = await uploadMemberPhotoService(
-      request.user.orgId, request.params.memberId, buffer, data.filename, request.user.userId,
-    );
+    const result = await uploadMemberPhotoService(request.user.orgId, request.params.memberId, buffer, data.filename, request.user.userId);
     return reply.send(result);
   },
 
@@ -95,33 +105,15 @@ export const membersController = {
     return reply.send(result);
   },
 
-  async getAccessStatus(req: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
-    return reply.send(await getMemberAccessStatusService(req.params.memberId, req.user.orgId));
+  async getAccessStatus(request: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
+    const status = await getMemberAccessStatusService(request.user.orgId, request.params.memberId);
+    return reply.send(status);
   },
-
-  async getMyMembershipStatus(req: FastifyRequest, reply: FastifyReply) {
-    const memberId = req.user.memberId;
-    if (!memberId) throw AppError.badRequest('Not a member');
-
-    const [membership] = await db.select().from(memberships).innerJoin(membershipPlans, eq(memberships.planId, membershipPlans.id))
-      .where(and(eq(memberships.memberId, memberId), eq(memberships.status, 'ACTIVE')))
-      .limit(1);
-
-    if (!membership) return reply.send({ status: 'INACTIVE', planName: 'No Active Plan', daysLeft: 0, totalDays: 30 });
-
-    const today = new Date();
-    today.setHours(0,0,0,0);
-    const end = new Date(membership.memberships.endDate);
-    const start = new Date(membership.memberships.startDate);
-    const diffTime = end.getTime() - today.getTime();
-    const daysLeft = Math.max(0, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
-    const totalDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
-
-    return reply.send({
-      status: 'ACTIVE',
-      planName: membership.membership_plans.name,
-      daysLeft,
-      totalDays: totalDays || 30
-    });
+  
+  async getMyMembershipStatus(request: FastifyRequest, reply: FastifyReply) {
+    const [user] = await db.select({ memberId: users.memberId }).from(users).where(eq(users.id, request.user.userId));
+    if (!user?.memberId) throw AppError.notFound('MEMBER_NOT_FOUND', 'User does not have a member profile');
+    const status = await getMemberAccessStatusService(request.user.orgId, user.memberId);
+    return reply.send(status);
   }
 };

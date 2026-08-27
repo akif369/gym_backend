@@ -47,6 +47,8 @@ export const members = pgTable('members', {
 
   // Soft delete
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  deletedBy: uuid('deleted_by'), // staff user_id or admin_id
+  deletionReason: text('deletion_reason'),
 
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),

@@ -1,9 +1,8 @@
 import { db } from '../../db/index';
-import {
-  members, memberEmergencyContacts, memberHealthProfiles, memberMeasurements, organizations
-} from '../../db/schema/index';
+import { members, memberEmergencyContacts, memberHealthProfiles, memberMeasurements, organizations, users, userSessions } from '../../db/schema/index';
 import { trainers, trainerAssignments } from '../../db/schema/trainers.schema';
 import { memberMemberships } from '../../db/schema/memberships.schema';
+import { invoices } from '../../db/schema/payments.schema';
 import { attendanceLogs } from '../../db/schema/attendance.schema';
 import { paymentTransactions } from '../../db/schema/payments.schema';
 import { ptSessions } from '../../db/schema/pt.schema';
@@ -77,10 +76,15 @@ export async function listMembersService(orgId: string, query: Record<string, un
   const status = query['status'] as string | undefined;
   const branchId = query['branchId'] as string | undefined;
 
+  const includeDeleted = query['includeDeleted'] === 'true';
+
   const conditions: any[] = [
     eq(members.organizationId, orgId),
-    isNull(members.deletedAt),
   ];
+
+  if (!includeDeleted) {
+    conditions.push(isNull(members.deletedAt));
+  }
 
   if (search) {
     conditions.push(
@@ -457,28 +461,94 @@ export async function deleteMemberService(
   orgId: string,
   memberId: string,
   actorId: string,
+  deletionReason?: string,
 ) {
   const [updated] = await db
     .update(members)
-    .set({ deletedAt: new Date(), updatedAt: new Date() })
+    .set({ deletedAt: new Date(), deletedBy: actorId, deletionReason, status: 'INACTIVE', updatedAt: new Date() })
     .where(and(eq(members.id, memberId), eq(members.organizationId, orgId), isNull(members.deletedAt)))
-    .returning({ id: members.id });
+    .returning({ id: members.id, status: members.status });
 
   if (!updated) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
 
   await auditLog({
     organizationId: orgId,
     actorId,
-    action: AuditAction.MEMBER_STATUS_CHANGED, // Or create AuditAction.MEMBER_DELETED
+    action: AuditAction.MEMBER_STATUS_CHANGED,
     entityType: 'member',
     entityId: memberId,
-    description: 'Member soft-deleted',
+    description: `Member soft-deleted. Reason: ${deletionReason || 'None'}`,
   });
+
+  // Revoke user sessions
+  try {
+    const memberUsers = await db.select({ id: users.id }).from(users).where(eq(users.memberId, memberId));
+    if (memberUsers.length > 0) {
+      const userIds = memberUsers.map(u => u.id);
+      for (const uid of userIds) {
+        await db.delete(userSessions).where(eq(userSessions.userId, uid));
+      }
+    }
+  } catch (err) {
+    log.error({ err, memberId }, 'Failed to revoke user sessions on member deletion');
+  }
 
   syncMemberBiometricAccessService(orgId, memberId, { explicitGroup: 99 })
     .catch(err => log.error({ err, memberId }, 'Failed to revoke biometric access on member deletion'));
 
-  return { success: true };
+  return updated;
+}
+
+// ── Hard Delete Member ────────────────────────────────────────────────────────
+
+export async function hardDeleteMemberService(
+  orgId: string,
+  memberId: string,
+  actorId: string,
+) {
+  const [deleted] = await db
+    .delete(members)
+    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId)))
+    .returning({ id: members.id });
+
+  if (!deleted) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
+
+  await auditLog({
+    organizationId: orgId,
+    actorId,
+    action: AuditAction.MEMBER_DELETED,
+    entityType: 'member',
+    entityId: memberId,
+    description: 'Member permanently deleted from database',
+  });
+
+  return deleted;
+}
+
+// ── Deletion Summary ──────────────────────────────────────────────────────────
+
+export async function getMemberDeletionSummaryService(
+  orgId: string,
+  memberId: string,
+) {
+  const [memberExists] = await db.select({ id: members.id }).from(members).where(and(eq(members.id, memberId), eq(members.organizationId, orgId)));
+  if (!memberExists) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
+
+  const [membershipsCount] = await db.select({ count: count() }).from(memberMemberships).where(eq(memberMemberships.memberId, memberId));
+  const [activeMembershipsCount] = await db.select({ count: count() }).from(memberMemberships).where(and(eq(memberMemberships.memberId, memberId), eq(memberMemberships.status, 'ACTIVE')));
+  const [attendanceCount] = await db.select({ count: count() }).from(attendanceLogs).where(eq(attendanceLogs.memberId, memberId));
+  const [paymentsCount] = await db.select({ count: count() }).from(paymentTransactions).where(eq(paymentTransactions.memberId, memberId));
+  const [invoicesCount] = await db.select({ count: count() }).from(invoices).where(eq(invoices.memberId, memberId));
+  const [ptSessionsCount] = await db.select({ count: count() }).from(ptSessions).where(eq(ptSessions.memberId, memberId));
+
+  return {
+    totalMemberships: membershipsCount?.count ?? 0,
+    activeMemberships: activeMembershipsCount?.count ?? 0,
+    attendanceRecords: attendanceCount?.count ?? 0,
+    paymentTransactions: paymentsCount?.count ?? 0,
+    invoices: invoicesCount?.count ?? 0,
+    ptSessions: ptSessionsCount?.count ?? 0,
+  };
 }
 
 // ── Member Activity Timeline ──────────────────────────────────────────────────

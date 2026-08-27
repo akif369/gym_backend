@@ -16,6 +16,8 @@ export async function membersRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.patch('/:memberId', { preHandler: authAndUpdate, schema: { tags: ['Members'], summary: 'Update member profile' } }, membersController.update);
   fastify.patch('/:memberId/status', { preHandler: authAndUpdate, schema: { tags: ['Members'], summary: 'Change member status' } }, membersController.updateStatus);
   fastify.delete('/:memberId', { preHandler: authAndUpdate, schema: { tags: ['Members'], summary: 'Delete member' } }, membersController.delete);
+  fastify.delete('/:memberId/permanent', { preHandler: [requireAuth, requirePermission('platform.admin')], schema: { tags: ['Members'], summary: 'Hard Delete member' } }, membersController.hardDelete);
+  fastify.get('/:memberId/deletion-summary', { preHandler: authAndView, schema: { tags: ['Members'], summary: 'Get member deletion summary' } }, membersController.getDeletionSummary);
   fastify.get('/:memberId/activity', { preHandler: authAndView, schema: { tags: ['Members'], summary: 'Member activity timeline' } }, membersController.getActivity);
   fastify.get('/:memberId/measurements', { preHandler: authAndView, schema: { tags: ['Members'], summary: 'Member measurement history' } }, membersController.getMeasurements);
   fastify.post('/:memberId/measurements', { preHandler: authAndCreate, schema: { tags: ['Members'], summary: 'Add body measurement' } }, membersController.addMeasurement);
