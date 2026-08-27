@@ -7,6 +7,10 @@ import {
   uploadMemberPhotoService, deleteMemberPhotoService,
   getMemberAccessStatusService,
 } from './members.service';
+import { db } from '../../db/index';
+import { memberships, membershipPlans } from '../../db/schema/memberships.schema';
+import { eq, and } from 'drizzle-orm';
+import { AppError } from '../../common/errors/AppError';
 import { isStrictPaymentPolicyEnabled } from '../org/org.service';
 
 export const membersController = {
@@ -91,8 +95,33 @@ export const membersController = {
     return reply.send(result);
   },
 
-  async getAccessStatus(request: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
-    const accessStatus = await getMemberAccessStatusService(request.user.orgId, request.params.memberId);
-    return reply.send(accessStatus);
+  async getAccessStatus(req: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
+    return reply.send(await getMemberAccessStatusService(req.params.memberId, req.user.orgId));
   },
+
+  async getMyMembershipStatus(req: FastifyRequest, reply: FastifyReply) {
+    const memberId = req.user.memberId;
+    if (!memberId) throw AppError.badRequest('Not a member');
+
+    const [membership] = await db.select().from(memberships).innerJoin(membershipPlans, eq(memberships.planId, membershipPlans.id))
+      .where(and(eq(memberships.memberId, memberId), eq(memberships.status, 'ACTIVE')))
+      .limit(1);
+
+    if (!membership) return reply.send({ status: 'INACTIVE', planName: 'No Active Plan', daysLeft: 0, totalDays: 30 });
+
+    const today = new Date();
+    today.setHours(0,0,0,0);
+    const end = new Date(membership.memberships.endDate);
+    const start = new Date(membership.memberships.startDate);
+    const diffTime = end.getTime() - today.getTime();
+    const daysLeft = Math.max(0, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
+    const totalDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+
+    return reply.send({
+      status: 'ACTIVE',
+      planName: membership.membership_plans.name,
+      daysLeft,
+      totalDays: totalDays || 30
+    });
+  }
 };

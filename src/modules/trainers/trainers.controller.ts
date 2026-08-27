@@ -1,8 +1,7 @@
-import type { FastifyRequest, FastifyReply } from 'fastify';
 import {
   listTrainersService, createTrainerService, getTrainerService, updateTrainerService,
   updateTrainerStatusService, getTrainerMembersService, assignMembersService,
-  removeTrainerMemberService, getTrainerPerformanceService,
+  removeTrainerMemberService, getTrainerPerformanceService, getTrainerDashboardService
 } from './trainers.service';
 
 export const trainersController = {
@@ -35,5 +34,8 @@ export const trainersController = {
   },
   async performance(req: FastifyRequest<{ Params: { trainerId: string } }>, reply: FastifyReply) {
     return reply.send(await getTrainerPerformanceService(req.user.orgId, req.params.trainerId));
+  },
+  async meDashboard(req: FastifyRequest, reply: FastifyReply) {
+    return reply.send(await getTrainerDashboardService(req.user.orgId, req.user.userId));
   },
 };

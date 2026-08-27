@@ -106,3 +106,61 @@ export async function getTrainerPerformanceService(orgId: string, trainerId: str
     },
   };
 }
+
+export async function getTrainerDashboardService(orgId: string, trainerUserId: string) {
+  const [trainer] = await db.select().from(trainers).where(and(eq(trainers.userId, trainerUserId), isNull(trainers.deletedAt))).limit(1);
+  if (!trainer) throw AppError.notFound(ErrorCode.TRAINER_NOT_FOUND, 'Trainer profile not found');
+
+  const mRes = await db.select({ count: count() }).from(trainerAssignments).where(and(eq(trainerAssignments.trainerId, trainer.id), isNull(trainerAssignments.unassignedAt)));
+  const membersAssigned = mRes[0]?.count ?? 0;
+  
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  const [cRes] = await db.select({ count: count() }).from(ptSessions).where(and(eq(ptSessions.trainerId, trainer.id), eq(ptSessions.status, 'COMPLETED')));
+  const completedSessions = cRes?.count ?? 0;
+
+  const todaySessionsRes = await db.select().from(ptSessions)
+    .where(and(
+      eq(ptSessions.trainerId, trainer.id),
+      gt(ptSessions.startTime, today),
+      lt(ptSessions.startTime, tomorrow)
+    ))
+    .orderBy(ptSessions.startTime);
+
+  const topClientsRes = await db.select({ member: members }).from(trainerAssignments).innerJoin(members, eq(members.id, trainerAssignments.memberId)).where(and(eq(trainerAssignments.trainerId, trainer.id), isNull(trainerAssignments.unassignedAt))).limit(5);
+
+  return {
+    stats: {
+      totalClients: membersAssigned,
+      activeClients: membersAssigned,
+      sessionsToday: todaySessionsRes.length,
+      sessionsThisWeek: 0,
+      sessionsThisMonth: 0,
+      completedSessions: completedSessions,
+      cancelledSessions: 0,
+      clientAttendanceRate: 100,
+      weeklySessionData: [0,0,0,0,0,0,0]
+    },
+    todaySessions: todaySessionsRes.map((s: any) => ({
+      id: s.id,
+      client: 'Client ' + s.memberId.substring(0, 4),
+      time: new Date(s.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      duration: s.durationMinutes + ' min',
+      type: s.sessionType || 'PT',
+      status: s.status,
+      avatar: 'C'
+    })),
+    topClients: topClientsRes.map((r: any) => ({
+      id: r.member.id,
+      name: r.member.firstName + ' ' + r.member.lastName,
+      sessions: 0,
+      attendance: 100,
+      goal: 'General',
+      avatar: r.member.firstName[0],
+      trend: 'up'
+    })),
+  };
+}

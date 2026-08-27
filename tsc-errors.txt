@@ -1,0 +1,12 @@
+delete user who have access to deleet member.
+
+staff need biometric setup.
+
+add new user needed to autoamticaly setup biometric device pin
+
+device always oneline fix (setting.page.hardware):
+
+    >only allway biometric action only if device is online.
+
+animated icons animateicon.
+

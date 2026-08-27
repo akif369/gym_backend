@@ -7,6 +7,7 @@ export async function trainersRoutes(fastify: FastifyInstance): Promise<void> {
   const authView = [requireAuth, requirePermission('trainer.view')];
   const authManage = [requireAuth, requirePermission('trainer.manage')];
 
+  fastify.get('/me/dashboard', { preHandler: [requireAuth], schema: { tags: ['Trainers'], summary: 'My Trainer Dashboard' } }, trainersController.meDashboard);
   fastify.get('/', { preHandler: authView, schema: { tags: ['Trainers'], summary: 'List trainers' } }, trainersController.list);
   fastify.post('/', { preHandler: authManage, schema: { tags: ['Trainers'], summary: 'Create trainer' } }, trainersController.create);
   fastify.get('/:trainerId', { preHandler: authView, schema: { tags: ['Trainers'], summary: 'Trainer detail' } }, trainersController.getOne);

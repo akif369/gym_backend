@@ -8,6 +8,8 @@ export async function membersRoutes(fastify: FastifyInstance): Promise<void> {
   const authAndCreate = [requireAuth, requirePermission('member.create')];
   const authAndUpdate = [requireAuth, requirePermission('member.update')];
 
+  fastify.get('/me/membership-status', { preHandler: [requireAuth], schema: { tags: ['Members'], summary: 'Get my membership status' } }, membersController.getMyMembershipStatus);
+  
   fastify.get('/', { preHandler: authAndView, schema: { tags: ['Members'], summary: 'List members (paginated, filterable)' } }, membersController.list);
   fastify.post('/', { preHandler: authAndCreate, schema: { tags: ['Members'], summary: 'Create member' } }, membersController.create);
   fastify.get('/:memberId', { preHandler: authAndView, schema: { tags: ['Members'], summary: 'Get member detail' } }, membersController.getOne);
