@@ -69,6 +69,11 @@ export async function processAdmsAttendance(
     const verify = parts[3];
 
     const eventTime = new Date(timeStr);
+    if (isNaN(eventTime.getTime())) {
+      log.warn({ deviceSn, pin, timeStr }, 'Invalid event time received from device');
+      continue;
+    }
+
     const eventHash = crypto.createHash('sha256').update(`${deviceSn}:${pin}:${timeStr}`).digest('hex');
 
     const [existingEvent] = await db.select({ id: biometricEvents.id })
