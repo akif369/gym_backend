@@ -5,6 +5,7 @@ import {
   getMemberActivityService, getMemberMeasurementsService, addMemberMeasurementService,
   getMemberHealthProfileService, updateMemberHealthProfileService,
   uploadMemberPhotoService, deleteMemberPhotoService,
+  getMemberAccessStatusService,
 } from './members.service';
 import { isStrictPaymentPolicyEnabled } from '../org/org.service';
 
@@ -88,5 +89,10 @@ export const membersController = {
   async deletePhoto(request: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
     const result = await deleteMemberPhotoService(request.user.orgId, request.params.memberId, request.user.userId);
     return reply.send(result);
+  },
+
+  async getAccessStatus(request: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
+    const accessStatus = await getMemberAccessStatusService(request.user.orgId, request.params.memberId);
+    return reply.send(accessStatus);
   },
 };

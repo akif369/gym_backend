@@ -21,4 +21,5 @@ export async function membersRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.patch('/:memberId/health-profile', { preHandler: authAndUpdate, schema: { tags: ['Members'], summary: 'Update health profile' } }, membersController.updateHealthProfile);
   fastify.post('/:memberId/photo', { preHandler: authAndUpdate, schema: { tags: ['Members'], summary: 'Upload member photo', consumes: ['multipart/form-data'] } }, membersController.uploadPhoto);
   fastify.delete('/:memberId/photo', { preHandler: authAndUpdate, schema: { tags: ['Members'], summary: 'Delete member photo' } }, membersController.deletePhoto);
+  fastify.get('/:memberId/access-status', { preHandler: authAndView, schema: { tags: ['Members'], summary: 'Get current access status' } }, membersController.getAccessStatus);
 }

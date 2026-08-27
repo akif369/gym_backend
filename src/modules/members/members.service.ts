@@ -693,3 +693,90 @@ export async function deleteMemberPhotoService(
 
   return { success: true };
 }
+
+// ── Access Status ─────────────────────────────────────────────────────────────
+
+export async function getMemberAccessStatusService(orgId: string, memberId: string, tx: any = db) {
+  const [member] = await tx
+    .select({
+      id: members.id,
+      status: members.status,
+      deletedAt: members.deletedAt,
+      orgTimezone: organizations.timezone,
+    })
+    .from(members)
+    .innerJoin(organizations, eq(organizations.id, members.organizationId))
+    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId)))
+    .limit(1);
+
+  if (!member || member.deletedAt) {
+    return {
+      allowed: false,
+      accessStatus: 'MEMBER_INACTIVE',
+      reason: 'Member does not exist or is deleted',
+      memberStatus: 'ARCHIVED',
+    };
+  }
+
+  if (member.status !== 'ACTIVE') {
+    return {
+      allowed: false,
+      accessStatus: 'MEMBER_INACTIVE',
+      reason: 'Member profile is not active',
+      memberStatus: member.status,
+    };
+  }
+
+  const tz = member.orgTimezone || 'Asia/Kolkata';
+  const todayStr = (() => {
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+      const part = (type: string) => parts.find(item => item.type === type)?.value;
+      return `${part('year')}-${part('month')}-${part('day')}`;
+    } catch {
+      return new Date().toISOString().slice(0, 10);
+    }
+  })();
+
+  const [effectiveMembership] = await tx
+    .select({
+      id: memberMemberships.id,
+      status: memberMemberships.status,
+      endDate: memberMemberships.endDate,
+    })
+    .from(memberMemberships)
+    .where(and(
+      eq(memberMemberships.memberId, memberId),
+      eq(memberMemberships.status, 'ACTIVE'),
+      sql`${memberMemberships.endDate} >= ${todayStr}`
+    ))
+    .orderBy(desc(memberMemberships.createdAt))
+    .limit(1);
+
+  if (!effectiveMembership) {
+    const [latest] = await tx
+      .select({ status: memberMemberships.status })
+      .from(memberMemberships)
+      .where(eq(memberMemberships.memberId, memberId))
+      .orderBy(desc(memberMemberships.createdAt))
+      .limit(1);
+      
+    return {
+      allowed: false,
+      accessStatus: latest ? (latest.status === 'ACTIVE' ? 'EXPIRED' : latest.status) : 'NO_MEMBERSHIP',
+      reason: latest ? (latest.status === 'ACTIVE' ? 'Membership expired' : `Membership is ${latest.status}`) : 'No membership found',
+      memberStatus: member.status,
+    };
+  }
+
+  return {
+    allowed: true,
+    accessStatus: 'ELIGIBLE',
+    reason: 'Active membership',
+    memberStatus: member.status,
+    effectiveMembership: {
+      id: effectiveMembership.id,
+      endDate: effectiveMembership.endDate,
+    }
+  };
+}

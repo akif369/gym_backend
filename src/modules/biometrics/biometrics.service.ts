@@ -8,6 +8,7 @@ import { eq, and, desc, asc, ne, isNull, sql, lt } from 'drizzle-orm';
 import { createLogger } from '../../common/logger/index';
 import crypto from 'crypto';
 import { AppError, ErrorCode } from '../../common/errors/AppError';
+import { getMemberAccessStatusService } from '../members/members.service';
 
 const log = createLogger('biometrics-service');
 
@@ -31,36 +32,8 @@ export function currentDateInTimeZone(timeZone: string) {
  * Group 99: All other statuses (EXPIRED, FROZEN, INACTIVE, ARCHIVED, CANCELLED) or no active membership.
  */
 export async function calculateMemberAccessGroup(orgId: string, memberId: string, tx: any = db): Promise<number> {
-  const [member] = await tx
-    .select({
-      id: members.id,
-      status: members.status,
-      deletedAt: members.deletedAt,
-      orgTimezone: organizations.timezone,
-    })
-    .from(members)
-    .innerJoin(organizations, eq(organizations.id, members.organizationId))
-    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId)))
-    .limit(1);
-
-  if (!member || member.deletedAt || member.status !== 'ACTIVE') {
-    return BIOMETRIC_ACCESS_GROUP_DENIED;
-  }
-
-  const todayStr = currentDateInTimeZone(member.orgTimezone || 'Asia/Kolkata');
-
-  // Check if member has at least one ACTIVE membership that hasn't expired
-  const [activePlan] = await tx
-    .select({ id: memberMemberships.id })
-    .from(memberMemberships)
-    .where(and(
-      eq(memberMemberships.memberId, memberId),
-      eq(memberMemberships.status, 'ACTIVE'),
-      sql`${memberMemberships.endDate} >= ${todayStr}`
-    ))
-    .limit(1);
-
-  return activePlan ? BIOMETRIC_ACCESS_GROUP_ALLOWED : BIOMETRIC_ACCESS_GROUP_DENIED;
+  const status = await getMemberAccessStatusService(orgId, memberId, tx);
+  return status.allowed ? BIOMETRIC_ACCESS_GROUP_ALLOWED : BIOMETRIC_ACCESS_GROUP_DENIED;
 }
 
 export async function processAdmsAttendance(
