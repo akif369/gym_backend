@@ -16,41 +16,38 @@ export interface TenantContext {
 /**
  * Returns a Drizzle ORM condition for all records belonging to the organization.
  */
-export function tenantWhere(table: any, ctx: TenantContext): SQL {
+export function tenantWhere(table: any, ctx: TenantContext): SQL | undefined {
+  if (!table.organizationId) return undefined;
   return eq(table.organizationId, ctx.organizationId);
 }
 
 /**
  * Returns a Drizzle ORM condition for records belonging to the active branch.
  */
-export function branchWhere(table: any, ctx: TenantContext): SQL {
+export function branchWhere(table: any, ctx: TenantContext): SQL | undefined {
+  if (!table.branchId) return undefined;
   if (!ctx.activeBranchId) {
     // If there is no active branch (e.g. platform admin, or user hasn't selected one), 
     // it's up to business logic if we allow fallback or strict deny. 
     // Usually, branchWhere requires an active branch.
     throw AppError.forbidden(ErrorCode.FORBIDDEN, 'No active branch selected');
   }
-  return and(
-    eq(table.organizationId, ctx.organizationId),
-    eq(table.branchId, ctx.activeBranchId)
-  )!;
+  return eq(table.branchId, ctx.activeBranchId);
 }
 
 /**
  * Returns a Drizzle ORM condition for records from branches the user is allowed to access.
  */
-export function accessibleBranchesWhere(table: any, ctx: TenantContext): SQL {
+export function accessibleBranchesWhere(table: any, ctx: TenantContext): SQL | undefined {
+  if (!table.branchId) return undefined;
   if (ctx.role === 'SUPER_ADMIN' || ctx.role === 'SYSTEM') {
-    return eq(table.organizationId, ctx.organizationId);
+    return undefined;
   }
   if (!ctx.accessibleBranchIds || ctx.accessibleBranchIds.length === 0) {
      // Ensure query returns no rows rather than breaking SQL
      return sql`1=0`;
   }
-  return and(
-    eq(table.organizationId, ctx.organizationId),
-    inArray(table.branchId, ctx.accessibleBranchIds)
-  )!;
+  return inArray(table.branchId, ctx.accessibleBranchIds);
 }
 
 /**

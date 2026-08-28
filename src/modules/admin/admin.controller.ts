@@ -9,6 +9,8 @@ import {
   resetOrganizationOwnerPassword,
   createOrganization,
   getGlobalAuditLogs,
+  getOrganizationUsers,
+  updateAdminUser,
 } from './admin.service';
 
 export const adminController = {
@@ -61,5 +63,13 @@ export const adminController = {
 
   async getAuditLogs(req: FastifyRequest, reply: FastifyReply) {
     return reply.send({ logs: await getGlobalAuditLogs() });
+  },
+
+  async getUsers(req: FastifyRequest<{ Params: { orgId: string } }>, reply: FastifyReply) {
+    return reply.send({ users: await getOrganizationUsers(req.params.orgId) });
+  },
+
+  async updateUser(req: FastifyRequest<{ Params: { userId: string } }>, reply: FastifyReply) {
+    return reply.send({ user: await updateAdminUser(req.params.userId, req.body as any) });
   },
 };

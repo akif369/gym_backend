@@ -249,3 +249,45 @@ export async function getGlobalAuditLogs() {
     .orderBy(sql`${staffAuditLogs.createdAt} DESC`)
     .limit(100);
 }
+
+export async function getOrganizationUsers(orgId: string) {
+  // Return all staff users (filtering out MEMBER role)
+  return await db
+    .select({
+      id: users.id,
+      email: users.email,
+      firstName: users.firstName,
+      lastName: users.lastName,
+      role: users.role,
+      status: users.status,
+      branchId: users.branchId,
+      createdAt: users.createdAt,
+    })
+    .from(users)
+    .where(sql`${users.organizationId} = ${orgId} AND ${users.role} != 'MEMBER'`)
+    .orderBy(sql`${users.createdAt} ASC`);
+}
+
+export async function updateAdminUser(userId: string, payload: { firstName?: string; lastName?: string; role?: any; status?: 'ACTIVE' | 'INACTIVE'; branchId?: string | null }) {
+  const [user] = await db
+    .update(users)
+    .set({
+      ...payload,
+      updatedAt: new Date(),
+    })
+    .where(eq(users.id, userId))
+    .returning();
+
+  if (!user) {
+    throw AppError.notFound(ErrorCode.STAFF_NOT_FOUND, 'User not found');
+  }
+
+  return {
+    id: user.id,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    role: user.role,
+    status: user.status,
+    branchId: user.branchId,
+  };
+}
