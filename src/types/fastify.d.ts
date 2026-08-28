@@ -4,6 +4,7 @@
 
 import 'fastify';
 import '@fastify/jwt';
+import { TenantContext } from '../common/auth/tenant';
 
 export interface JwtAccessPayload {
   userId: string;
@@ -15,8 +16,9 @@ export interface JwtAccessPayload {
   sessionId: string;
 }
 
-export interface AuthUser extends JwtAccessPayload {
+export interface AuthUser extends JwtAccessPayload, TenantContext {
   permissions: string[];
+  sessionId: string;
 }
 
 declare module '@fastify/jwt' {

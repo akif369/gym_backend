@@ -1,5 +1,5 @@
-import { pgTable, uuid, text, timestamp } from 'drizzle-orm/pg-core';
-import { organizations } from './org.schema';
+import { pgTable, uuid, text, timestamp, foreignKey } from 'drizzle-orm/pg-core';
+import { organizations, branches } from './org.schema';
 import { members } from './members.schema';
 import { invoices } from './payments.schema';
 
@@ -9,6 +9,7 @@ export const messageDeliveries = pgTable('message_deliveries', {
   organizationId: uuid('organization_id')
     .notNull()
     .references(() => organizations.id, { onDelete: 'cascade' }),
+  branchId: uuid('branch_id'),
   memberId: uuid('member_id').references(() => members.id, { onDelete: 'set null' }),
   invoiceId: uuid('invoice_id').references(() => invoices.id, { onDelete: 'set null' }),
   eventType: text('event_type').notNull(),
@@ -22,6 +23,11 @@ export const messageDeliveries = pgTable('message_deliveries', {
   sentAt: timestamp('sent_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [
+  foreignKey({
+    columns: [table.branchId, table.organizationId],
+    foreignColumns: [branches.id, branches.organizationId],
+  }),
+]);
 
 export type MessageDelivery = typeof messageDeliveries.$inferSelect;

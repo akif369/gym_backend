@@ -5,11 +5,12 @@ import { auditLog } from '../../common/audit/auditLog';
 import { AuditAction } from '../../db/schema/audit.schema';
 import { config } from '../../config/env';
 import { createLogger } from '../../common/logger/index';
+import { TenantContext } from '../../common/auth/tenant';
 
 const log = createLogger('notifications-service');
 
 type SendTextInput = {
-  organizationId: string;
+  ctx: TenantContext;
   memberId?: string;
   invoiceId?: string;
   eventType: 'INVOICE' | 'MEMBERSHIP_RENEWED' | 'MEMBERSHIP_EXPIRED' | 'MANUAL' | 'WELCOME';
@@ -71,7 +72,7 @@ export async function sendTextMessage(input: SendTextInput) {
     .select()
     .from(messageDeliveries)
     .where(and(
-      eq(messageDeliveries.organizationId, input.organizationId),
+      eq(messageDeliveries.organizationId, input.ctx.organizationId),
       eq(messageDeliveries.idempotencyKey, input.idempotencyKey),
     ))
     .limit(1);
@@ -80,7 +81,8 @@ export async function sendTextMessage(input: SendTextInput) {
 
   const configured = config.evolutionGo.enabled;
   const [delivery] = await db.insert(messageDeliveries).values({
-    organizationId: input.organizationId,
+    organizationId: input.ctx.organizationId,
+    branchId: input.ctx.activeBranchId,
     memberId: input.memberId,
     invoiceId: input.invoiceId,
     eventType: input.eventType,
@@ -127,7 +129,7 @@ export async function sendTextMessage(input: SendTextInput) {
       .returning();
 
     await auditLog({
-      organizationId: input.organizationId,
+      organizationId: input.ctx.organizationId,
       actorId: input.actorId,
       action: AuditAction.MESSAGE_SENT,
       entityType: 'message_delivery',
@@ -144,7 +146,7 @@ export async function sendTextMessage(input: SendTextInput) {
       .returning();
 
     await auditLog({
-      organizationId: input.organizationId,
+      organizationId: input.ctx.organizationId,
       actorId: input.actorId,
       action: AuditAction.MESSAGE_FAILED,
       entityType: 'message_delivery',
@@ -165,7 +167,7 @@ export async function sendMediaMessage(input: SendMediaInput) {
     .select()
     .from(messageDeliveries)
     .where(and(
-      eq(messageDeliveries.organizationId, input.organizationId),
+      eq(messageDeliveries.organizationId, input.ctx.organizationId),
       eq(messageDeliveries.idempotencyKey, input.idempotencyKey),
     ))
     .limit(1);
@@ -174,7 +176,7 @@ export async function sendMediaMessage(input: SendMediaInput) {
 
   const configured = config.evolutionGo.enabled;
   const [delivery] = await db.insert(messageDeliveries).values({
-    organizationId: input.organizationId,
+    organizationId: input.ctx.organizationId,
     memberId: input.memberId,
     invoiceId: input.invoiceId,
     eventType: input.eventType,
@@ -228,7 +230,7 @@ export async function sendMediaMessage(input: SendMediaInput) {
       .returning();
 
     await auditLog({
-      organizationId: input.organizationId,
+      organizationId: input.ctx.organizationId,
       actorId: input.actorId,
       action: AuditAction.MESSAGE_SENT,
       entityType: 'message_delivery',
@@ -245,7 +247,7 @@ export async function sendMediaMessage(input: SendMediaInput) {
       .returning();
 
     await auditLog({
-      organizationId: input.organizationId,
+      organizationId: input.ctx.organizationId,
       actorId: input.actorId,
       action: AuditAction.MESSAGE_FAILED,
       entityType: 'message_delivery',

@@ -8,6 +8,7 @@ import { paymentTransactions } from '../../db/schema/payments.schema';
 import { ptSessions } from '../../db/schema/pt.schema';
 import { trainers } from '../../db/schema/trainers.schema';
 import { branches } from '../../db/schema/org.schema';
+import { TenantContext, tenantWhere, accessibleBranchesWhere } from '../../common/auth/tenant';
 import { toISTDateString, istDayStart, istMonthStart } from '../../common/utils/timezone';
 
 const asNumber = (value: string | number | null | undefined) => Number(value ?? 0);
@@ -21,7 +22,7 @@ function monthStart(date = new Date()) {
   return istMonthStart(date);
 }
 
-export async function getDashboardService(orgId: string, branchId?: string) {
+export async function getDashboardService(ctx: TenantContext) {
   const now = new Date();
   const today = dayStart(now);
   const tomorrow = new Date(today);
@@ -36,7 +37,7 @@ export async function getDashboardService(orgId: string, branchId?: string) {
   attendanceSince.setDate(attendanceSince.getDate() - 6);
   const revenueSince = new Date(now.getFullYear(), now.getMonth() - 5, 1);
 
-  const orgFilter = (table: any) => branchId ? and(eq(table.organizationId, orgId), eq(table.branchId, branchId)) : eq(table.organizationId, orgId);
+  const orgFilter = (table: any) => and(tenantWhere(table, ctx), accessibleBranchesWhere(table, ctx));
 
   const [
     currentlyInsideRes,
@@ -144,20 +145,20 @@ export async function getDashboardService(orgId: string, branchId?: string) {
     ));
 
   let branchPerformance: any[] = [];
-  if (!branchId) {
-    const allBranches = await db.select().from(branches).where(eq(branches.organizationId, orgId));
+  if (!ctx.activeBranchId) {
+    const allBranches = await db.select().from(branches).where(eq(branches.organizationId, ctx.organizationId));
     branchPerformance = await Promise.all(allBranches.map(async b => {
       const [mRes, rRes, iRes] = await Promise.all([
         db.select({ activeMembers: count() }).from(members).where(and(
-          eq(members.organizationId, orgId), eq(members.branchId, b.id), isNull(members.deletedAt),
+          eq(members.organizationId, ctx.organizationId), eq(members.branchId, b.id), isNull(members.deletedAt),
           sql`(SELECT status FROM member_memberships WHERE member_id = ${members.id} ORDER BY created_at DESC LIMIT 1) = 'ACTIVE'`
         )),
         db.select({ monthRevenue: sum(paymentTransactions.totalAmount) }).from(paymentTransactions).where(and(
-          eq(paymentTransactions.organizationId, orgId), eq(paymentTransactions.branchId, b.id),
+          eq(paymentTransactions.organizationId, ctx.organizationId), eq(paymentTransactions.branchId, b.id),
           eq(paymentTransactions.status, 'PAID'), gte(paymentTransactions.createdAt, thisMonth)
         )),
         db.select({ currentlyInside: count() }).from(attendanceLogs).where(and(
-          eq(attendanceLogs.organizationId, orgId), eq(attendanceLogs.branchId, b.id), isNull(attendanceLogs.checkOutAt)
+          eq(attendanceLogs.organizationId, ctx.organizationId), eq(attendanceLogs.branchId, b.id), isNull(attendanceLogs.checkOutAt)
         ))
       ]);
       const cap = b.capacity || 100;

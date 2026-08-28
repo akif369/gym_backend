@@ -434,7 +434,7 @@ export async function inviteStaffService(
   // Send WhatsApp invite if phone is provided
   if (data.phone) {
     await sendTextMessage({
-      organizationId: orgId,
+      ctx: { organizationId: orgId } as any,
       eventType: 'WELCOME',
       phone: data.phone,
       text: `Welcome to GYMatrix, ${data.firstName}! You have been invited to join the staff portal as a ${data.role}. Please set up your password here: ${inviteLink}`,
@@ -478,7 +478,7 @@ export async function resetStaffPasswordService(orgId: string, staffId: string, 
 
   if (staff.phone) {
     await sendTextMessage({
-      organizationId: orgId,
+      ctx: { organizationId: orgId } as any,
       eventType: 'MANUAL',
       phone: staff.phone,
       text: `Hello ${staff.firstName}, a password reset was requested for your GYMatrix account. Reset your password here: ${resetLink}`,

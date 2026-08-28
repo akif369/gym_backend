@@ -46,6 +46,10 @@ export const trainers = pgTable('trainers', {
 
 export const trainerAssignments = pgTable('trainer_assignments', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id')
+    .notNull()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  branchId: uuid('branch_id'),
   trainerId: uuid('trainer_id')
     .notNull()
     .references(() => trainers.id, { onDelete: 'cascade' }),
@@ -57,7 +61,12 @@ export const trainerAssignments = pgTable('trainer_assignments', {
   unassignedAt: timestamp('unassigned_at', { withTimezone: true }),
   notes: text('notes'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [
+  foreignKey({
+    columns: [table.branchId, table.organizationId],
+    foreignColumns: [branches.id, branches.organizationId],
+  }),
+]);
 
 // ── Type Exports ──────────────────────────────────────────────────────────────
 

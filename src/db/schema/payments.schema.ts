@@ -76,6 +76,7 @@ export const invoices = pgTable('invoices', {
   organizationId: uuid('organization_id')
     .notNull()
     .references(() => organizations.id, { onDelete: 'restrict' }),
+  branchId: uuid('branch_id'),
   memberId: uuid('member_id').references(() => members.id),
   membershipId: uuid('membership_id').references(() => memberMemberships.id, { onDelete: 'set null' }),
   memberName: text('member_name'), // denormalized
@@ -97,6 +98,10 @@ export const invoices = pgTable('invoices', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex('invoices_organization_invoice_number_unique').on(table.organizationId, table.invoiceNumber),
+  foreignKey({
+    columns: [table.branchId, table.organizationId],
+    foreignColumns: [branches.id, branches.organizationId],
+  }),
 ]);
 
 // ── Invoice Line Items ─────────────────────────────────────────────────────────
@@ -137,6 +142,7 @@ export const reportExports = pgTable('report_exports', {
   organizationId: uuid('organization_id')
     .notNull()
     .references(() => organizations.id, { onDelete: 'cascade' }),
+  branchId: uuid('branch_id'),
   type: text('type').notNull(), // 'attendance' | 'revenue' | 'memberships' | 'trainers' | 'pt-sessions'
   format: text('format', { enum: ['CSV', 'PDF'] }).notNull().default('CSV'),
   status: text('status', { enum: ['PENDING', 'PROCESSING', 'DONE', 'FAILED'] }).notNull().default('PENDING'),
@@ -146,7 +152,12 @@ export const reportExports = pgTable('report_exports', {
   requestedBy: uuid('requested_by').references(() => users.id),
   completedAt: timestamp('completed_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [
+  foreignKey({
+    columns: [table.branchId, table.organizationId],
+    foreignColumns: [branches.id, branches.organizationId],
+  }),
+]);
 
 // ── Type Exports ──────────────────────────────────────────────────────────────
 

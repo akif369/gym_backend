@@ -1,6 +1,6 @@
-import { pgTable, uuid, text, timestamp, integer, boolean, numeric, jsonb, date, pgEnum, check, index } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, text, timestamp, integer, boolean, numeric, jsonb, date, pgEnum, check, index, foreignKey } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
-import { organizations } from './org.schema';
+import { organizations, branches } from './org.schema';
 import { members } from './members.schema';
 import { users } from './auth.schema';
 
@@ -34,6 +34,7 @@ export const membershipPlans = pgTable('membership_plans', {
   organizationId: uuid('organization_id')
     .notNull()
     .references(() => organizations.id, { onDelete: 'cascade' }),
+  branchId: uuid('branch_id'),
   name: text('name').notNull(),
   description: text('description'),
   durationDays: integer('duration_days').notNull(),
@@ -51,12 +52,20 @@ export const membershipPlans = pgTable('membership_plans', {
   check('plans_gst_check', sql`${table.gstPercent} >= 0 AND ${table.gstPercent} <= 100`),
   check('plans_joining_fee_check', sql`${table.joiningFee} >= 0`),
   check('plans_pt_sessions_check', sql`${table.ptSessionsIncluded} >= 0`),
+  foreignKey({
+    columns: [table.branchId, table.organizationId],
+    foreignColumns: [branches.id, branches.organizationId],
+  }),
 ]);
 
 // ── Member Memberships ────────────────────────────────────────────────────────
 
 export const memberMemberships = pgTable('member_memberships', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id')
+    .notNull()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  branchId: uuid('branch_id'),
   memberId: uuid('member_id')
     .notNull()
     .references(() => members.id, { onDelete: 'cascade' }),
@@ -80,12 +89,20 @@ export const memberMemberships = pgTable('member_memberships', {
   check('memberships_pt_used_check', sql`${table.ptSessionsUsed} >= 0 AND ${table.ptSessionsUsed} <= ${table.ptSessionsTotal}`),
   check('memberships_frozen_days_check', sql`${table.frozenDays} >= 0`),
   index('membership_status_idx').on(table.memberId, table.status, table.endDate),
+  foreignKey({
+    columns: [table.branchId, table.organizationId],
+    foreignColumns: [branches.id, branches.organizationId],
+  }),
 ]);
 
 // ── Membership Events (Immutable Ledger) ──────────────────────────────────────
 
 export const membershipEvents = pgTable('membership_events', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id')
+    .notNull()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  branchId: uuid('branch_id'),
   membershipId: uuid('membership_id').references(() => memberMemberships.id),
   memberId: uuid('member_id')
     .notNull()
@@ -96,7 +113,12 @@ export const membershipEvents = pgTable('membership_events', {
   notes: text('notes'),
   metadata: jsonb('metadata').default('{}'), // plan snapshot, dates, etc.
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [
+  foreignKey({
+    columns: [table.branchId, table.organizationId],
+    foreignColumns: [branches.id, branches.organizationId],
+  }),
+]);
 
 // ── Type Exports ──────────────────────────────────────────────────────────────
 

@@ -4,6 +4,7 @@ import { membershipPlans, memberMemberships, membershipEvents } from '../../db/s
 import { members } from '../../db/schema/members.schema';
 import { eq, and, isNull, desc, asc, count, sql, lt, ne, inArray } from 'drizzle-orm';
 import { AppError, ErrorCode } from '../../common/errors/AppError';
+import { TenantContext, tenantWhere, accessibleBranchesWhere } from '../../common/auth/tenant';
 import { parsePagination, paginationToLimitOffset, buildPaginatedResponse } from '../../common/pagination/paginate';
 import { auditLog } from '../../common/audit/auditLog';
 import { AuditAction } from '../../db/schema/audit.schema';
@@ -42,14 +43,13 @@ function currentDateInTimeZone(timeZone: string) {
 }
 
 async function sendRenewalNotification(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
   membership: typeof memberMemberships.$inferSelect,
   plan: typeof membershipPlans.$inferSelect,
-  actorId: string,
   invoiceAmount?: number,
 ) {
-  const invoice = await generateMembershipInvoiceService(orgId, {
+  const invoice = await generateMembershipInvoiceService(ctx.organizationId, {
     memberId,
     membershipId: membership.id,
     planName: plan.name,
@@ -58,13 +58,13 @@ async function sendRenewalNotification(
     price: String(invoiceAmount ?? Number(plan.price)),
     gstPercent: plan.gstPercent,
     notes: membership.notes ?? undefined,
-  }, actorId);
-  const settings = await getInvoiceSettingsService(orgId);
+  }, ctx.userId);
+  const settings = await getInvoiceSettingsService(ctx.organizationId);
   if (!settings.autoSendOnRenewal) return;
 
   const [member] = await db.select({ firstName: members.firstName, lastName: members.lastName, phone: members.phone })
     .from(members)
-    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId), isNull(members.deletedAt)))
+    .where(and(eq(members.id, memberId), tenantWhere(members, ctx), isNull(members.deletedAt)))
     .limit(1);
   if (!member?.phone) return;
 
@@ -87,7 +87,7 @@ Thank you for training with us!`;
     const publicInvoice = await getPublicInvoiceService(invoice.publicToken);
     const pdfBuffer = await generateInvoicePdfBuffer(publicInvoice);
     delivery = await sendMediaMessage({
-      organizationId: orgId,
+      ctx,
       memberId,
       invoiceId: invoice.id,
       eventType: 'MEMBERSHIP_RENEWED',
@@ -96,18 +96,18 @@ Thank you for training with us!`;
       pdfBuffer,
       filename: `Invoice_${invoice.invoiceNumber}.pdf`,
       idempotencyKey: `membership-renewed:${membership.id}`,
-      actorId,
+      actorId: ctx.userId,
     });
   } else {
     delivery = await sendTextMessage({
-      organizationId: orgId,
+      ctx,
       memberId,
       invoiceId: invoice.id,
       eventType: 'MEMBERSHIP_RENEWED',
       phone: member.phone,
       text,
       idempotencyKey: `membership-renewed:${membership.id}`,
-      actorId,
+      actorId: ctx.userId,
     });
   }
 
@@ -119,20 +119,22 @@ Thank you for training with us!`;
 // ── Helper: emit membership event ─────────────────────────────────────────────
 
 async function emitEvent(
+  ctx: TenantContext,
   membershipId: string | null,
   memberId: string,
   eventType: typeof membershipEvents.$inferInsert['eventType'],
-  actorId?: string,
   actorName?: string,
   notes?: string,
   metadata?: unknown,
   tx: any = db,
 ) {
   await tx.insert(membershipEvents).values({
+    organizationId: ctx.organizationId,
+    branchId: ctx.activeBranchId,
     membershipId,
     memberId,
     eventType,
-    actorId,
+    actorId: ctx.userId,
     actorName,
     notes,
     metadata: metadata as any,
@@ -141,32 +143,32 @@ async function emitEvent(
 
 // ── Plans ─────────────────────────────────────────────────────────────────────
 
-export async function listPlansService(orgId: string) {
+export async function listPlansService(ctx: TenantContext) {
   return db
     .select()
     .from(membershipPlans)
-    .where(eq(membershipPlans.organizationId, orgId))
+    .where(and(tenantWhere(membershipPlans, ctx), accessibleBranchesWhere(membershipPlans, ctx)))
     .orderBy(asc(membershipPlans.durationDays));
 }
 
-export async function createPlanService(orgId: string, data: Omit<typeof membershipPlans.$inferInsert, 'id' | 'organizationId' | 'createdAt' | 'updatedAt'>) {
-  const [plan] = await db.insert(membershipPlans).values({ ...data, organizationId: orgId }).returning();
+export async function createPlanService(ctx: TenantContext, data: Omit<typeof membershipPlans.$inferInsert, 'id' | 'organizationId' | 'branchId' | 'createdAt' | 'updatedAt'>) {
+  const [plan] = await db.insert(membershipPlans).values({ ...data, organizationId: ctx.organizationId, branchId: ctx.activeBranchId }).returning();
   log.info({ planId: plan!.id, name: data.name }, 'Membership plan created');
   return plan;
 }
 
-export async function getPlanService(orgId: string, planId: string) {
+export async function getPlanService(ctx: TenantContext, planId: string) {
   const [plan] = await db
     .select()
     .from(membershipPlans)
-    .where(and(eq(membershipPlans.id, planId), eq(membershipPlans.organizationId, orgId)))
+    .where(and(eq(membershipPlans.id, planId), tenantWhere(membershipPlans, ctx), accessibleBranchesWhere(membershipPlans, ctx)))
     .limit(1);
   if (!plan) throw AppError.notFound(ErrorCode.MEMBERSHIP_PLAN_NOT_FOUND, 'Membership plan not found');
   return plan;
 }
 
-export async function updatePlanService(orgId: string, planId: string, data: Partial<typeof membershipPlans.$inferInsert>) {
-  await getPlanService(orgId, planId);
+export async function updatePlanService(ctx: TenantContext, planId: string, data: Partial<typeof membershipPlans.$inferInsert>) {
+  await getPlanService(ctx, planId);
   const [updated] = await db
     .update(membershipPlans)
     .set({ ...data, updatedAt: new Date() })
@@ -175,8 +177,8 @@ export async function updatePlanService(orgId: string, planId: string, data: Par
   return updated;
 }
 
-export async function updatePlanStatusService(orgId: string, planId: string, status: 'ACTIVE' | 'INACTIVE') {
-  await getPlanService(orgId, planId);
+export async function updatePlanStatusService(ctx: TenantContext, planId: string, status: 'ACTIVE' | 'INACTIVE') {
+  await getPlanService(ctx, planId);
   const [updated] = await db
     .update(membershipPlans)
     .set({ status, updatedAt: new Date() })
@@ -185,8 +187,8 @@ export async function updatePlanStatusService(orgId: string, planId: string, sta
   return updated;
 }
 
-export async function deletePlanService(orgId: string, planId: string) {
-  await getPlanService(orgId, planId);
+export async function deletePlanService(ctx: TenantContext, planId: string) {
+  await getPlanService(ctx, planId);
 
   const [usage] = await db
     .select({ total: count() })
@@ -201,40 +203,40 @@ export async function deletePlanService(orgId: string, planId: string) {
   }
 
   await db.delete(membershipPlans)
-    .where(and(eq(membershipPlans.id, planId), eq(membershipPlans.organizationId, orgId)));
+    .where(and(eq(membershipPlans.id, planId), tenantWhere(membershipPlans, ctx)));
 }
 
 // ── Member Memberships ────────────────────────────────────────────────────────
 
-export async function getMemberMembershipsService(orgId: string, memberId: string) {
+export async function getMemberMembershipsService(ctx: TenantContext, memberId: string) {
   const [member] = await db.select({ id: members.id }).from(members)
-    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId), isNull(members.deletedAt)))
+    .where(and(eq(members.id, memberId), tenantWhere(members, ctx), isNull(members.deletedAt)))
     .limit(1);
   if (!member) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
 
   return db
     .select()
     .from(memberMemberships)
-    .where(eq(memberMemberships.memberId, memberId))
+    .where(and(eq(memberMemberships.memberId, memberId), tenantWhere(memberMemberships, ctx), accessibleBranchesWhere(memberMemberships, ctx)))
     .orderBy(desc(memberMemberships.createdAt));
 }
 
-export async function getMembershipEventsService(orgId: string, memberId: string) {
+export async function getMembershipEventsService(ctx: TenantContext, memberId: string) {
   const [member] = await db.select({ id: members.id }).from(members)
-    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId), isNull(members.deletedAt)))
+    .where(and(eq(members.id, memberId), tenantWhere(members, ctx), isNull(members.deletedAt)))
     .limit(1);
   if (!member) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
 
   return db
     .select()
     .from(membershipEvents)
-    .where(eq(membershipEvents.memberId, memberId))
+    .where(and(eq(membershipEvents.memberId, memberId), tenantWhere(membershipEvents, ctx), accessibleBranchesWhere(membershipEvents, ctx)))
     .orderBy(desc(membershipEvents.createdAt));
 }
 
 // ── List All Membership Events (org-wide) ─────────────────────────────────────
 
-export async function listMembershipEventsService(orgId: string, query: Record<string, unknown>) {
+export async function listMembershipEventsService(ctx: TenantContext, query: Record<string, unknown>) {
   const { page, pageSize } = parsePagination(query);
   const { limit, offset } = paginationToLimitOffset({ page, pageSize });
 
@@ -243,7 +245,7 @@ export async function listMembershipEventsService(orgId: string, query: Record<s
     .select({ total: count() })
     .from(membershipEvents)
     .innerJoin(members, eq(members.id, membershipEvents.memberId))
-    .where(eq(members.organizationId, orgId));
+    .where(and(tenantWhere(members, ctx), accessibleBranchesWhere(membershipEvents, ctx)));
   const total = totalRes[0]?.total ?? 0;
 
   const items = await db
@@ -261,7 +263,7 @@ export async function listMembershipEventsService(orgId: string, query: Record<s
     })
     .from(membershipEvents)
     .innerJoin(members, eq(members.id, membershipEvents.memberId))
-    .where(eq(members.organizationId, orgId))
+    .where(and(tenantWhere(members, ctx), accessibleBranchesWhere(membershipEvents, ctx)))
     .orderBy(desc(membershipEvents.createdAt))
     .limit(limit)
     .offset(offset);
@@ -284,7 +286,7 @@ async function checkIdempotency(key?: string): Promise<boolean> {
 // ── Create Membership ─────────────────────────────────────────────────────────
 
 export async function createMembershipService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
   data: {
     planId: string;
@@ -292,14 +294,13 @@ export async function createMembershipService(
     notes?: string;
     idempotencyKey?: string;
   },
-  actorId: string,
   actorName?: string,
 ) {
   if (data.idempotencyKey && await checkIdempotency(data.idempotencyKey)) {
     throw AppError.conflict(ErrorCode.IDEMPOTENCY_CONFLICT, 'Duplicate request with same idempotency key');
   }
 
-  const plan = await getPlanService(orgId, data.planId);
+  const plan = await getPlanService(ctx, data.planId);
   if (plan.status === 'INACTIVE') {
     throw AppError.badRequest(ErrorCode.MEMBERSHIP_PLAN_INACTIVE, 'Membership plan is not active');
   }
@@ -310,6 +311,8 @@ export async function createMembershipService(
   const [membership] = await db
     .insert(memberMemberships)
     .values({
+      organizationId: ctx.organizationId,
+      branchId: ctx.activeBranchId,
       memberId,
       planId: plan.id,
       planName: plan.name,
@@ -319,15 +322,15 @@ export async function createMembershipService(
       ptSessionsTotal: plan.ptSessionsIncluded,
       ...(data.notes ? { notes: data.notes } : {}),
       ...(data.idempotencyKey ? { idempotencyKey: data.idempotencyKey } : {}),
-      ...(actorId ? { createdBy: actorId } : {}),
+      createdBy: ctx.userId,
     } as any)
     .returning();
 
-  await emitEvent(membership!.id, memberId, 'CREATED', actorId, actorName, data.notes, { plan: { id: plan.id, name: plan.name, durationDays: plan.durationDays } });
+  await emitEvent(ctx, membership!.id, memberId, 'CREATED', actorName, data.notes, { plan: { id: plan.id, name: plan.name, durationDays: plan.durationDays } });
 
   await auditLog({
-    organizationId: orgId,
-    actorId,
+    organizationId: ctx.organizationId,
+    actorId: ctx.userId,
     action: AuditAction.MEMBERSHIP_CREATED,
     entityType: 'membership',
     entityId: membership!.id,
@@ -341,11 +344,11 @@ export async function createMembershipService(
 
 // ── Activate Membership ───────────────────────────────────────────────────────
 
-export async function activateMembershipService(orgId: string, memberId: string, actorId: string, actorName?: string) {
+export async function activateMembershipService(ctx: TenantContext, memberId: string, actorName?: string) {
   const [membership] = await db
     .select()
     .from(memberMemberships)
-    .where(and(eq(memberMemberships.memberId, memberId), eq(memberMemberships.status, 'PENDING')))
+    .where(and(eq(memberMemberships.memberId, memberId), tenantWhere(memberMemberships, ctx), eq(memberMemberships.status, 'PENDING')))
     .orderBy(desc(memberMemberships.createdAt))
     .limit(1);
 
@@ -359,10 +362,10 @@ export async function activateMembershipService(orgId: string, memberId: string,
 
   await db.update(members).set({ status: 'ACTIVE', updatedAt: new Date() }).where(eq(members.id, memberId));
 
-  await emitEvent(membership.id, memberId, 'ACTIVATED', actorId, actorName);
-  await auditLog({ organizationId: orgId, actorId, action: AuditAction.MEMBERSHIP_ACTIVATED, entityType: 'membership', entityId: membership.id });
+  await emitEvent(ctx, membership.id, memberId, 'ACTIVATED', actorName);
+  await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_ACTIVATED, entityType: 'membership', entityId: membership.id });
 
-  syncMemberBiometricAccessService(orgId, memberId)
+  syncMemberBiometricAccessService(ctx, memberId)
     .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership activation'));
 
   return updated;
@@ -371,14 +374,13 @@ export async function activateMembershipService(orgId: string, memberId: string,
 // ── Renew Membership ──────────────────────────────────────────────────────────
 
 export async function renewMembershipService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
   data: { planId?: string; notes?: string; invoiceAmount?: number; idempotencyKey?: string },
-  actorId: string,
   actorName?: string,
 ) {
   const [member] = await db.select({ id: members.id }).from(members)
-    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId), isNull(members.deletedAt)))
+    .where(and(eq(members.id, memberId), tenantWhere(members, ctx), isNull(members.deletedAt)))
     .limit(1);
   if (!member) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
 
@@ -388,7 +390,7 @@ export async function renewMembershipService(
       .innerJoin(members, eq(members.id, memberMemberships.memberId))
       .where(and(
         eq(memberMemberships.idempotencyKey, data.idempotencyKey),
-        eq(members.organizationId, orgId),
+        tenantWhere(members, ctx),
       ))
       .limit(1);
     if (existing) return existing.membership;
@@ -398,13 +400,13 @@ export async function renewMembershipService(
   const [current] = await db
     .select()
     .from(memberMemberships)
-    .where(and(eq(memberMemberships.memberId, memberId), eq(memberMemberships.status, 'ACTIVE')))
+    .where(and(eq(memberMemberships.memberId, memberId), tenantWhere(memberMemberships, ctx), eq(memberMemberships.status, 'ACTIVE')))
     .limit(1);
 
   const planId = data.planId ?? current?.planId;
   if (!planId) throw AppError.badRequest(ErrorCode.MEMBERSHIP_NOT_FOUND, 'No active membership or plan specified');
 
-  const plan = await getPlanService(orgId, planId);
+  const plan = await getPlanService(ctx, planId);
   if (data.invoiceAmount !== undefined && (!Number.isFinite(data.invoiceAmount) || data.invoiceAmount <= 0)) {
     throw AppError.badRequest(ErrorCode.BAD_REQUEST, 'Invoice amount must be greater than zero');
   }
@@ -419,6 +421,8 @@ export async function renewMembershipService(
     const [newMembership] = await tx
       .insert(memberMemberships)
       .values({
+        organizationId: ctx.organizationId,
+        branchId: ctx.activeBranchId,
         memberId,
         planId: plan.id,
         planName: plan.name,
@@ -428,7 +432,7 @@ export async function renewMembershipService(
         ptSessionsTotal: plan.ptSessionsIncluded,
         ...(data.notes ? { notes: data.notes } : {}),
         ...(data.idempotencyKey ? { idempotencyKey: data.idempotencyKey } : {}),
-        ...(actorId ? { createdBy: actorId } : {}),
+        createdBy: ctx.userId,
       } as any)
       .returning();
 
@@ -440,16 +444,16 @@ export async function renewMembershipService(
     // Ensure member is active
     await tx.update(members).set({ status: 'ACTIVE', updatedAt: new Date() }).where(eq(members.id, memberId));
 
-    await emitEvent(newMembership!.id, memberId, 'RENEWED', actorId, actorName, data.notes, { plan: { name: plan.name } }, tx);
-    await auditLog({ organizationId: orgId, actorId, action: AuditAction.MEMBERSHIP_RENEWED, entityType: 'membership', entityId: newMembership!.id }, tx);
+    await emitEvent(ctx, newMembership!.id, memberId, 'RENEWED', actorName, data.notes, { plan: { name: plan.name } }, tx);
+    await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_RENEWED, entityType: 'membership', entityId: newMembership!.id }, tx);
     
     return newMembership;
   });
 
-  syncMemberBiometricAccessService(orgId, memberId)
+  syncMemberBiometricAccessService(ctx, memberId)
     .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership renewal'));
 
-  sendRenewalNotification(orgId, memberId, membership!, plan, actorId, data.invoiceAmount)
+  sendRenewalNotification(ctx, memberId, membership!, plan, data.invoiceAmount)
     .catch((error) => {
       // A provider outage must not undo a completed membership renewal.
       log.error({ err: error, memberId, membershipId: membership!.id }, 'Renewal notification workflow failed');
@@ -512,14 +516,14 @@ export async function expireDueMembershipsService() {
   let notified = 0;
 
   for (const { candidate, updated } of expiredMemberships) {
-    syncMemberBiometricAccessService(candidate.organizationId, updated.memberId)
+    syncMemberBiometricAccessService({ organizationId: candidate.organizationId } as any, updated.memberId)
       .catch(err => log.error({ err, memberId: updated.memberId }, 'Failed to sync biometric access on membership expiry sweep'));
 
     if (!candidate.phone) continue;
     try {
       const memberName = `${candidate.firstName} ${candidate.lastName}`.trim();
       const delivery = await sendTextMessage({
-        organizationId: candidate.organizationId,
+        ctx: { organizationId: candidate.organizationId } as any,
         memberId: updated.memberId,
         eventType: 'MEMBERSHIP_EXPIRED',
         phone: candidate.phone,
@@ -617,7 +621,7 @@ export async function sweepInactiveMembersService() {
             description: `Member status updated to INACTIVE due to ${daysBeforeInactive} days of expiry`,
           }, tx);
 
-          syncMemberBiometricAccessService(target.orgId, member.id)
+          syncMemberBiometricAccessService({ organizationId: target.orgId } as any, member.id)
             .catch(err => log.error({ err, memberId: member.id }, 'Failed to sync biometric access on inactive sweep'));
         }
       }
@@ -629,16 +633,15 @@ export async function sweepInactiveMembersService() {
 // ── Freeze Membership ─────────────────────────────────────────────────────────
 
 export async function freezeMembershipService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
   data: { freezeStart: string; freezeEnd: string; reason?: string },
-  actorId: string,
   actorName?: string,
 ) {
   const [membership] = await db
     .select()
     .from(memberMemberships)
-    .where(and(eq(memberMemberships.memberId, memberId), eq(memberMemberships.status, 'ACTIVE')))
+    .where(and(eq(memberMemberships.memberId, memberId), tenantWhere(memberMemberships, ctx), eq(memberMemberships.status, 'ACTIVE')))
     .limit(1);
 
   if (!membership) throw AppError.notFound(ErrorCode.MEMBERSHIP_NOT_ACTIVE, 'No active membership to freeze');
@@ -664,13 +667,13 @@ export async function freezeMembershipService(
       .where(eq(memberMemberships.id, membership.id))
       .returning();
 
-    await emitEvent(membership.id, memberId, 'FROZEN', actorId, actorName, data.reason, { freezeStart: data.freezeStart, freezeEnd: data.freezeEnd, freezeDays }, tx);
-    await auditLog({ organizationId: orgId, actorId, action: AuditAction.MEMBERSHIP_FROZEN, entityType: 'membership', entityId: membership.id }, tx);
+    await emitEvent(ctx, membership.id, memberId, 'FROZEN', actorName, data.reason, { freezeStart: data.freezeStart, freezeEnd: data.freezeEnd, freezeDays }, tx);
+    await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_FROZEN, entityType: 'membership', entityId: membership.id }, tx);
     
     return res;
   });
 
-  syncMemberBiometricAccessService(orgId, memberId)
+  syncMemberBiometricAccessService(ctx, memberId)
     .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership freeze'));
 
   return updated;
@@ -678,11 +681,11 @@ export async function freezeMembershipService(
 
 // ── Resume Membership ─────────────────────────────────────────────────────────
 
-export async function resumeMembershipService(orgId: string, memberId: string, actorId: string, actorName?: string) {
+export async function resumeMembershipService(ctx: TenantContext, memberId: string, actorName?: string) {
   const [membership] = await db
     .select()
     .from(memberMemberships)
-    .where(and(eq(memberMemberships.memberId, memberId), eq(memberMemberships.status, 'FROZEN')))
+    .where(and(eq(memberMemberships.memberId, memberId), tenantWhere(memberMemberships, ctx), eq(memberMemberships.status, 'FROZEN')))
     .limit(1);
 
   if (!membership) throw AppError.notFound(ErrorCode.MEMBERSHIP_NOT_FROZEN, 'No frozen membership found');
@@ -694,13 +697,13 @@ export async function resumeMembershipService(orgId: string, memberId: string, a
       .where(eq(memberMemberships.id, membership.id))
       .returning();
 
-    await emitEvent(membership.id, memberId, 'RESUMED', actorId, actorName, undefined, undefined, tx);
-    await auditLog({ organizationId: orgId, actorId, action: AuditAction.MEMBERSHIP_RESUMED, entityType: 'membership', entityId: membership.id }, tx);
+    await emitEvent(ctx, membership.id, memberId, 'RESUMED', actorName, undefined, undefined, tx);
+    await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_RESUMED, entityType: 'membership', entityId: membership.id }, tx);
     
     return res;
   });
 
-  syncMemberBiometricAccessService(orgId, memberId)
+  syncMemberBiometricAccessService(ctx, memberId)
     .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership resume'));
 
   return updated;
@@ -708,12 +711,13 @@ export async function resumeMembershipService(orgId: string, memberId: string, a
 
 // ── Cancel Membership ─────────────────────────────────────────────────────────
 
-export async function cancelMembershipService(orgId: string, memberId: string, reason: string, actorId: string, actorName?: string) {
+export async function cancelMembershipService(ctx: TenantContext, memberId: string, reason: string, actorName?: string) {
   const [membership] = await db
     .select()
     .from(memberMemberships)
     .where(and(
       eq(memberMemberships.memberId, memberId),
+      tenantWhere(memberMemberships, ctx),
       // Can cancel ACTIVE or PENDING
     ))
     .orderBy(desc(memberMemberships.createdAt))
@@ -730,13 +734,13 @@ export async function cancelMembershipService(orgId: string, memberId: string, r
       .where(eq(memberMemberships.id, membership.id))
       .returning();
 
-    await emitEvent(membership.id, memberId, 'CANCELLED', actorId, actorName, reason, undefined, tx);
-    await auditLog({ organizationId: orgId, actorId, action: AuditAction.MEMBERSHIP_CANCELLED, entityType: 'membership', entityId: membership.id, description: reason }, tx);
+    await emitEvent(ctx, membership.id, memberId, 'CANCELLED', actorName, reason, undefined, tx);
+    await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_CANCELLED, entityType: 'membership', entityId: membership.id, description: reason }, tx);
     
     return res;
   });
 
-  syncMemberBiometricAccessService(orgId, memberId)
+  syncMemberBiometricAccessService(ctx, memberId)
     .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership cancellation'));
 
   return updated;
@@ -744,11 +748,11 @@ export async function cancelMembershipService(orgId: string, memberId: string, r
 
 // ── Extend Membership ─────────────────────────────────────────────────────────
 
-export async function extendMembershipService(orgId: string, memberId: string, days: number, reason: string, actorId: string, actorName?: string) {
+export async function extendMembershipService(ctx: TenantContext, memberId: string, days: number, reason: string, actorName?: string) {
   const [membership] = await db
     .select()
     .from(memberMemberships)
-    .where(and(eq(memberMemberships.memberId, memberId), eq(memberMemberships.status, 'ACTIVE')))
+    .where(and(eq(memberMemberships.memberId, memberId), tenantWhere(memberMemberships, ctx), eq(memberMemberships.status, 'ACTIVE')))
     .limit(1);
 
   if (!membership) throw AppError.notFound(ErrorCode.MEMBERSHIP_NOT_ACTIVE, 'No active membership to extend');
@@ -762,13 +766,13 @@ export async function extendMembershipService(orgId: string, memberId: string, d
       .where(eq(memberMemberships.id, membership.id))
       .returning();
 
-    await emitEvent(membership.id, memberId, 'EXTENDED', actorId, actorName, reason, { extendedBy: days }, tx);
-    await auditLog({ organizationId: orgId, actorId, action: AuditAction.MEMBERSHIP_EXTENDED, entityType: 'membership', entityId: membership.id, description: `Extended by ${days} days` }, tx);
+    await emitEvent(ctx, membership.id, memberId, 'EXTENDED', actorName, reason, { extendedBy: days }, tx);
+    await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_EXTENDED, entityType: 'membership', entityId: membership.id, description: `Extended by ${days} days` }, tx);
     
     return res;
   });
 
-  syncMemberBiometricAccessService(orgId, memberId)
+  syncMemberBiometricAccessService(ctx, memberId)
     .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership extension'));
 
   return updated;

@@ -32,8 +32,19 @@ export function currentDateInTimeZone(timeZone: string) {
  * Group 1: Member status is ACTIVE AND member has at least one active membership with endDate >= today.
  * Group 99: All other statuses (EXPIRED, FROZEN, INACTIVE, ARCHIVED, CANCELLED) or no active membership.
  */
-export async function calculateMemberAccessGroup(orgId: string, memberId: string, tx: any = db): Promise<number> {
-  const status = await getMemberAccessStatusService(orgId, memberId, tx);
+import { TenantContext, tenantWhere, accessibleBranchesWhere } from '../../common/auth/tenant';
+
+export async function calculateMemberAccessGroup(ctx: TenantContext, memberId: string, tx: any = db): Promise<number> {
+  const systemCtx: TenantContext = {
+    organizationId: ctx.organizationId,
+    activeBranchId: null,
+    accessibleBranchIds: [],
+    userId: 'SYSTEM',
+    role: 'SUPER_ADMIN',
+    permissions: [],
+    organizationMode: 'SINGLE_GYM', // default dummy
+  };
+  const status = await getMemberAccessStatusService(systemCtx, memberId, tx);
   return status.allowed ? BIOMETRIC_ACCESS_GROUP_ALLOWED : BIOMETRIC_ACCESS_GROUP_DENIED;
 }
 
@@ -403,12 +414,12 @@ export async function processAdmsDeviceCmd(deviceSn: string, payload: string) {
 
 // Service methods for WebApp UI
 
-export async function listDevicesService(orgId: string) {
-  return db.select().from(biometricDevices).where(eq(biometricDevices.organizationId, orgId)).orderBy(desc(biometricDevices.createdAt));
+export async function listDevicesService(ctx: TenantContext) {
+  return db.select().from(biometricDevices).where(and(tenantWhere(biometricDevices, ctx), accessibleBranchesWhere(biometricDevices, ctx))).orderBy(desc(biometricDevices.createdAt));
 }
 
-export async function listIdentitiesService(orgId: string) {
-  const [org] = await db.select({ timezone: organizations.timezone }).from(organizations).where(eq(organizations.id, orgId)).limit(1);
+export async function listIdentitiesService(ctx: TenantContext) {
+  const [org] = await db.select({ timezone: organizations.timezone }).from(organizations).where(eq(organizations.id, ctx.organizationId)).limit(1);
   const todayStr = currentDateInTimeZone(org?.timezone || 'Asia/Kolkata');
 
   const rows = await db.select({
@@ -435,7 +446,7 @@ export async function listIdentitiesService(orgId: string) {
   }).from(biometricIdentities)
     .innerJoin(members, eq(members.id, biometricIdentities.memberId))
     .innerJoin(biometricDevices, eq(biometricDevices.id, biometricIdentities.deviceId))
-    .where(eq(members.organizationId, orgId))
+    .where(and(tenantWhere(members, ctx), accessibleBranchesWhere(members, ctx)))
     .orderBy(desc(biometricIdentities.createdAt));
 
   return rows.map(r => {
@@ -457,9 +468,9 @@ export async function listIdentitiesService(orgId: string) {
   });
 }
 
-export async function registerDeviceService(orgId: string, data: { branchId: string; serialNumber: string; deviceName: string; deviceType?: string; purpose?: any }) {
+export async function registerDeviceService(ctx: TenantContext, data: { branchId: string; serialNumber: string; deviceName: string; deviceType?: string; purpose?: any }) {
   const [device] = await db.insert(biometricDevices).values({
-    organizationId: orgId,
+    organizationId: ctx.organizationId,
     branchId: data.branchId,
     serialNumber: data.serialNumber,
     deviceName: data.deviceName,
@@ -469,8 +480,8 @@ export async function registerDeviceService(orgId: string, data: { branchId: str
   return device;
 }
 
-export async function deleteDeviceService(orgId: string, deviceId: string) {
-  const [device] = await db.delete(biometricDevices).where(and(eq(biometricDevices.id, deviceId), eq(biometricDevices.organizationId, orgId))).returning();
+export async function deleteDeviceService(ctx: TenantContext, deviceId: string) {
+  const [device] = await db.delete(biometricDevices).where(and(eq(biometricDevices.id, deviceId), tenantWhere(biometricDevices, ctx), accessibleBranchesWhere(biometricDevices, ctx))).returning();
   if (!device) throw AppError.notFound(ErrorCode.NOT_FOUND, 'Device not found');
   return device;
 }
@@ -480,7 +491,7 @@ export async function deleteDeviceService(orgId: string, deviceId: string) {
  * Implements smart delta diffing: skips queuing duplicate commands if the device is already in the target group and SYNCED.
  */
 export async function syncMemberBiometricAccessService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
   options?: { force?: boolean; explicitPin?: string; explicitName?: string; explicitGroup?: number; explicitBranchId?: string }
 ) {
@@ -492,7 +503,7 @@ export async function syncMemberBiometricAccessService(
     lastName: members.lastName,
     status: members.status,
     deletedAt: members.deletedAt,
-  }).from(members).where(and(eq(members.id, memberId), eq(members.organizationId, orgId))).limit(1);
+  }).from(members).where(and(eq(members.id, memberId), tenantWhere(members, ctx))).limit(1);
 
   if (!member) {
     throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
@@ -507,7 +518,7 @@ export async function syncMemberBiometricAccessService(
     .where(eq(biometricDevices.branchId, effectiveBranchId)) : [];
 
   const orgDevices = branchDevices.length === 0
-    ? await db.select().from(biometricDevices).where(eq(biometricDevices.organizationId, orgId))
+    ? await db.select().from(biometricDevices).where(tenantWhere(biometricDevices, ctx))
     : branchDevices;
 
   const existingIdentityRecords = await db.select({ deviceId: biometricIdentities.deviceId })
@@ -529,7 +540,7 @@ export async function syncMemberBiometricAccessService(
     return { success: true, count: 0, reason: 'NO_DEVICES' as const };
   }
 
-  const calculatedGroup = await calculateMemberAccessGroup(orgId, memberId);
+  const calculatedGroup = await calculateMemberAccessGroup(ctx, memberId);
   const targetGroup = options?.explicitGroup !== undefined
     ? options.explicitGroup
     : calculatedGroup;
@@ -589,7 +600,8 @@ export async function syncMemberBiometricAccessService(
     // utility; this firmware rejects the shorter DATA UPDATE user / Group form.
     const commandString = `DATA UPDATE USERINFO PIN=${pin}\tName=${name}\tPrivilege=0\tGrp=${targetGroup}`;
     await db.insert(biometricDeviceCommands).values({
-      organizationId: orgId,
+      organizationId: ctx.organizationId,
+    branchId: device.branchId,
       deviceId: device.id,
       deviceSerial: device.serialNumber,
       commandString,
@@ -607,6 +619,8 @@ export async function syncMemberBiometricAccessService(
         .where(eq(biometricIdentities.id, existingIdentity.id));
     } else {
       await db.insert(biometricIdentities).values({
+        organizationId: device.organizationId,
+        branchId: device.branchId,
         memberId,
         deviceId: device.id,
         deviceUserId: pin,
@@ -626,8 +640,8 @@ export async function syncMemberBiometricAccessService(
  * Reconciles biometric access control for all members in the organization (or a specific branch).
  * Evaluates each member's target group (1 vs 99), performs delta diffing, and queues updates for out-of-sync devices.
  */
-export async function reconcileBiometricAccessService(orgId: string, branchId?: string | null) {
-  const branchConditions: any[] = [eq(biometricDevices.organizationId, orgId)];
+export async function reconcileBiometricAccessService(ctx: TenantContext, branchId?: string | null) {
+  const branchConditions: any[] = [tenantWhere(biometricDevices, ctx)];
   if (branchId) branchConditions.push(eq(biometricDevices.branchId, branchId));
 
   const devices = await db.select().from(biometricDevices).where(and(...branchConditions));
@@ -643,7 +657,7 @@ export async function reconcileBiometricAccessService(orgId: string, branchId?: 
   }
 
   const memberConditions: any[] = [
-    eq(members.organizationId, orgId),
+    tenantWhere(members, ctx),
   ];
   if (branchId) memberConditions.push(eq(members.branchId, branchId));
 
@@ -664,13 +678,13 @@ export async function reconcileBiometricAccessService(orgId: string, branchId?: 
 
   for (const m of allMembers) {
     if (!m.branchId) continue;
-    const targetGroup = await calculateMemberAccessGroup(orgId, m.id);
+    const targetGroup = await calculateMemberAccessGroup(ctx, m.id);
     if (targetGroup === 1) group1ActiveCount++;
     else group99DeniedCount++;
 
     // Reconciliation is idempotent. Only queue when the device is not already
     // confirmed in the calculated target group.
-    const result = await syncMemberBiometricAccessService(orgId, m.id, { explicitGroup: targetGroup });
+    const result = await syncMemberBiometricAccessService(ctx, m.id, { explicitGroup: targetGroup });
     if (result.count > 0) {
       commandsQueued += result.count;
     } else {
@@ -690,14 +704,14 @@ export async function reconcileBiometricAccessService(orgId: string, branchId?: 
 
 // Manual Sync Member to Devices (UI invocation)
 export async function syncMemberToBiometricsService(
-  orgId: string,
+  ctx: TenantContext,
   branchId: string,
   memberId: string,
   pin: string,
   name: string,
   accessGroup?: number
 ) {
-  return syncMemberBiometricAccessService(orgId, memberId, {
+  return syncMemberBiometricAccessService(ctx, memberId, {
     force: true,
     explicitPin: pin,
     explicitName: name,
@@ -706,16 +720,16 @@ export async function syncMemberToBiometricsService(
   });
 }
 
-export async function deleteBiometricIdentityService(orgId: string, identityId: string) {
+export async function deleteBiometricIdentityService(ctx: TenantContext, identityId: string) {
   const [identity] = await db.select().from(biometricIdentities).where(eq(biometricIdentities.id, identityId)).limit(1);
   if (!identity) throw AppError.notFound(ErrorCode.NOT_FOUND, 'Identity not found');
 
-  const [device] = await db.select().from(biometricDevices).where(and(eq(biometricDevices.id, identity.deviceId), eq(biometricDevices.organizationId, orgId))).limit(1);
+  const [device] = await db.select().from(biometricDevices).where(and(eq(biometricDevices.id, identity.deviceId), tenantWhere(biometricDevices, ctx))).limit(1);
   if (!device) throw AppError.notFound(ErrorCode.NOT_FOUND, 'Device not found');
 
   // Queue a command to delete the user from the physical device
   await db.insert(biometricDeviceCommands).values({
-    organizationId: orgId,
+    organizationId: ctx.organizationId,
     deviceId: device.id,
     deviceSerial: device.serialNumber,
     commandString: `DATA DELETE USERINFO PIN=${identity.deviceUserId}`,

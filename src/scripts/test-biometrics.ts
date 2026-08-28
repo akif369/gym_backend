@@ -43,6 +43,7 @@ async function runTest() {
       name: 'Main Branch',
     }).returning();
   }
+  const ctx: any = { organizationId: org!.id, activeBranchId: branch!.id, userId: 'SYSTEM', role: 'ADMIN' };
 
   // 2. Register test ZKTeco F09 device
   const deviceSn = 'TESTF09_' + Date.now();
@@ -73,13 +74,14 @@ async function runTest() {
   console.log(`✓ Created member ${member!.firstName} ${member!.lastName} (${memberNum})`);
 
   // 4. Test calculation with no active membership -> Expect Group 99
-  let group = await calculateMemberAccessGroup(org!.id, member!.id);
+  let group = await calculateMemberAccessGroup(ctx, member!.id);
   console.log(`Test 1: Access Group without active membership -> Group ${group} (Expected: 99)`);
   if (group !== 99) throw new Error('Expected Group 99 for member with no active membership');
 
   // 5. Create active membership plan and assign to member
   const [plan] = await db.insert(membershipPlans).values({
     organizationId: org!.id,
+    branchId: branch!.id,
     name: 'Annual Pass',
     price: '12000',
     durationDays: 365,
@@ -87,6 +89,8 @@ async function runTest() {
   }).returning();
 
   const [activeMembership] = await db.insert(memberMemberships).values({
+    organizationId: org!.id,
+    branchId: branch!.id,
     memberId: member!.id,
     planId: plan!.id,
     planName: plan!.name,
@@ -96,12 +100,12 @@ async function runTest() {
   }).returning();
 
   // 6. Test calculation with active membership -> Expect Group 1
-  group = await calculateMemberAccessGroup(org!.id, member!.id);
+  group = await calculateMemberAccessGroup(ctx, member!.id);
   console.log(`Test 2: Access Group with valid active membership -> Group ${group} (Expected: 1)`);
   if (group !== 1) throw new Error('Expected Group 1 for active member');
 
   // 7. Sync member to biometrics -> Expect command queued with Grp=1
-  const syncResult1 = await syncMemberBiometricAccessService(org!.id, member!.id);
+  const syncResult1 = await syncMemberBiometricAccessService(ctx, member!.id);
   console.log(`Test 3: Initial sync result -> Queued: ${syncResult1.count}, TargetGroup: ${syncResult1.targetGroup}`);
   if (syncResult1.count !== 1 || syncResult1.targetGroup !== 1) throw new Error('Failed to queue Group 1 command');
 
@@ -123,7 +127,7 @@ async function runTest() {
   if (identity?.syncStatus !== 'SYNCED' || identity?.accessGroup !== 1) throw new Error('Identity not marked SYNCED');
 
   // 8. Test smart delta diffing -> Second sync should queue 0 commands because already SYNCED and Grp=1
-  const deltaSyncResult = await syncMemberBiometricAccessService(org!.id, member!.id);
+  const deltaSyncResult = await syncMemberBiometricAccessService(ctx, member!.id);
   console.log(`Test 7: Smart Delta Diff Check (no status change) -> Commands queued: ${deltaSyncResult.count} (Expected: 0)`);
   if (deltaSyncResult.count !== 0) throw new Error('Smart delta diff failed, queued redundant command');
 
@@ -153,7 +157,7 @@ async function runTest() {
   if (expiredIdentity?.accessGroup !== 99 || expiredIdentity?.syncStatus !== 'SYNCED') throw new Error('Identity not marked Group 99 SYNCED');
 
   // 10. Reconcile test
-  const reconcileRes = await reconcileBiometricAccessService(org!.id, branch!.id);
+  const reconcileRes = await reconcileBiometricAccessService(ctx, branch!.id);
   console.log('Test 10: Reconcile sweep result ->', reconcileRes);
 
   console.log('🎉 ALL ZKTeco F09 BIOMETRIC ACCESS CONTROL TESTS PASSED SUCCESSFULLY! 🎉');

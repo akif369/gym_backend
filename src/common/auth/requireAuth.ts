@@ -1,7 +1,7 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { AppError, ErrorCode } from '../errors/AppError';
 import { db } from '../../db/index';
-import { users, userSessions } from '../../db/schema/index';
+import { users, userSessions, organizations, branches } from '../../db/schema/index';
 import { eq, and, isNull, gt } from 'drizzle-orm';
 import { DEFAULT_ROLE_PERMISSIONS } from '../../db/schema/rbac.schema';
 
@@ -31,12 +31,17 @@ export const requireAuth = async (
 
     // ── Super Admin Bypass ───────────────────────────────────────────────────
     if (decoded.role === 'SUPER_ADMIN') {
+      const activeBranchId = (request.headers['x-branch-id'] as string) || decoded.branchId || null;
       request.user = {
         userId: decoded.userId,
         email: decoded.email,
         role: decoded.role,
         orgId: decoded.orgId,
+        organizationId: decoded.orgId, // TenantContext
         branchId: decoded.branchId,
+        activeBranchId: activeBranchId || null,
+        accessibleBranchIds: activeBranchId ? [activeBranchId] : [], // Bypass for SA
+        organizationMode: 'MULTI_GYM',
         sessionId: decoded.sessionId,
         permissions: ['*'], // Super Admin has implicit global permissions
       };
@@ -68,8 +73,10 @@ export const requireAuth = async (
         role: users.role,
         organizationId: users.organizationId,
         branchId: users.branchId,
+        organizationMode: organizations.organizationMode,
       })
       .from(users)
+      .leftJoin(organizations, eq(users.organizationId, organizations.id))
       .where(and(eq(users.id, decoded.userId), isNull(users.deletedAt)))
       .limit(1);
 
@@ -84,13 +91,41 @@ export const requireAuth = async (
     // Resolve permissions (role defaults for now — per-user overrides checked separately)
     const permissions = DEFAULT_ROLE_PERMISSIONS[user.role] ?? [];
 
+    // Fetch accessible branches
+    const orgBranches = await db
+      .select({ id: branches.id })
+      .from(branches)
+      .where(eq(branches.organizationId, user.organizationId));
+    
+    let accessibleBranchIds: string[] = [];
+    if (user.role === 'ORGANIZATION_OWNER' || user.role === 'OWNER') {
+      accessibleBranchIds = orgBranches.map((b) => b.id);
+    } else if (user.branchId) {
+      // Staff/managers restricted to their assigned branch for now
+      accessibleBranchIds = [user.branchId];
+    }
+
+    // Determine active branch from header, fallback to token's branchId
+    let requestedBranchId = request.headers['x-branch-id'] as string | undefined;
+    let activeBranchId: string | null = requestedBranchId || user.branchId || null;
+
+    // Validate active branch against accessible branches
+    if (activeBranchId && !accessibleBranchIds.includes(activeBranchId)) {
+      // If requested branch is invalid, fallback to the first available or null
+      activeBranchId = accessibleBranchIds.length > 0 ? accessibleBranchIds[0] ?? null : null;
+    }
+
     // Attach to request
     request.user = {
       userId: decoded.userId,
       email: decoded.email,
       role: user.role,
       orgId: user.organizationId,
+      organizationId: user.organizationId,
       branchId: user.branchId,
+      activeBranchId: activeBranchId ?? null,
+      accessibleBranchIds,
+      organizationMode: user.organizationMode ?? 'SINGLE_GYM',
       sessionId: decoded.sessionId,
       permissions,
     };

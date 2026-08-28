@@ -19,6 +19,7 @@ import { config } from '../../config/env';
 import { sendTextMessage } from '../notifications/notifications.service';
 import { isAutoSyncBiometricsEnabled } from '../org/org.service';
 import { deleteBiometricIdentityService, syncMemberBiometricAccessService } from '../biometrics/biometrics.service';
+import { TenantContext, tenantWhere, accessibleBranchesWhere, assertBranchAccess } from '../../common/auth/tenant';
 
 const log = createLogger('members-service');
 
@@ -67,7 +68,7 @@ async function generateMemberNumber(orgId: string): Promise<string> {
 
 // ── List Members ──────────────────────────────────────────────────────────────
 
-export async function listMembersService(orgId: string, query: Record<string, unknown>) {
+export async function listMembersService(ctx: TenantContext, query: Record<string, unknown>) {
   const { page, pageSize } = parsePagination(query);
   const { limit, offset } = paginationToLimitOffset({ page, pageSize });
 
@@ -79,7 +80,8 @@ export async function listMembersService(orgId: string, query: Record<string, un
   const includeDeleted = query['includeDeleted'] === 'true';
 
   const conditions: any[] = [
-    eq(members.organizationId, orgId),
+    tenantWhere(members, ctx),
+    accessibleBranchesWhere(members, ctx),
   ];
 
   if (!includeDeleted) {
@@ -229,7 +231,7 @@ export async function listMembersService(orgId: string, query: Record<string, un
 // ── Create Member ─────────────────────────────────────────────────────────────
 
 export async function createMemberService(
-  orgId: string,
+  ctx: TenantContext,
   data: {
     firstName: string;
     lastName: string;
@@ -249,16 +251,20 @@ export async function createMemberService(
     pin?: string;
     accessGroup?: number;
   },
-  actorId: string,
 ) {
-  const memberNumber = await generateMemberNumber(orgId);
+  const branchId = data.branchId || ctx.activeBranchId;
+  if (branchId) {
+    assertBranchAccess(ctx, branchId);
+  }
+
+  const memberNumber = await generateMemberNumber(ctx.organizationId);
   const phone = normalizeIndianMobile(data.phone);
 
   const [member] = await db
     .insert(members)
     .values({
-      organizationId: orgId,
-      branchId: data.branchId,
+      organizationId: ctx.organizationId,
+      branchId: branchId,
       memberNumber,
       firstName: data.firstName,
       lastName: data.lastName,
@@ -295,8 +301,8 @@ export async function createMemberService(
   }
 
   await auditLog({
-    organizationId: orgId,
-    actorId,
+    organizationId: ctx.organizationId,
+    actorId: ctx.userId,
     action: AuditAction.MEMBER_CREATED,
     entityType: 'member',
     entityId: member.id,
@@ -309,13 +315,13 @@ export async function createMemberService(
     const quote = GYM_QUOTES[Math.floor(Math.random() * GYM_QUOTES.length)];
     const text = `Welcome to the gym, ${member.firstName} ${member.lastName}! Thank you for joining us.\n\n> ${quote}`;
     sendTextMessage({
-      organizationId: orgId,
+      ctx,
       memberId: member.id,
       eventType: 'WELCOME',
       phone: member.phone,
       text,
       idempotencyKey: `welcome_${member.id}`,
-      actorId,
+      actorId: ctx.userId,
     }).catch(err => log.error({ err, memberId: member.id }, 'Failed to send welcome message'));
   } catch (err) {
     log.error({ err, memberId: member.id }, 'Failed to initiate welcome message');
@@ -326,7 +332,7 @@ export async function createMemberService(
   let syncSucceeded = false;
 
   try {
-    const autoSyncEnabled = await isAutoSyncBiometricsEnabled(orgId);
+    const autoSyncEnabled = await isAutoSyncBiometricsEnabled(ctx.organizationId);
 
     // New members are mapped onto biometric devices unless the Add Member toggle is off
     // and org auto-sync is also disabled. Explicit syncToDevice=true always syncs.
@@ -336,7 +342,7 @@ export async function createMemberService(
       syncAttempted = true;
 
       const name = `${member.firstName} ${member.lastName}`.trim().substring(0, 24);
-      const result = await syncMemberBiometricAccessService(orgId, member.id, {
+      const result = await syncMemberBiometricAccessService(ctx, member.id, {
         force: true,
         explicitPin: data.pin,
         explicitName: name,
@@ -366,11 +372,16 @@ export async function createMemberService(
 
 // ── Get Member ────────────────────────────────────────────────────────────────
 
-export async function getMemberService(orgId: string, memberId: string) {
+export async function getMemberService(ctx: TenantContext, memberId: string) {
   const [member] = await db
     .select()
     .from(members)
-    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId), isNull(members.deletedAt)))
+    .where(and(
+      eq(members.id, memberId),
+      tenantWhere(members, ctx),
+      accessibleBranchesWhere(members, ctx),
+      isNull(members.deletedAt)
+    ))
     .limit(1);
 
   if (!member) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
@@ -420,12 +431,11 @@ export async function getMemberService(orgId: string, memberId: string) {
 // ── Update Member ─────────────────────────────────────────────────────────────
 
 export async function updateMemberService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
   data: Partial<typeof members.$inferInsert>,
-  actorId: string,
 ) {
-  const before = await getMemberService(orgId, memberId);
+  const before = await getMemberService(ctx, memberId);
   const updateData = data.phone === undefined
     ? data
     : { ...data, phone: normalizeIndianMobile(data.phone) };
@@ -433,14 +443,14 @@ export async function updateMemberService(
   const [updated] = await db
     .update(members)
     .set({ ...updateData, updatedAt: new Date() })
-    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId), isNull(members.deletedAt)))
+    .where(and(eq(members.id, memberId), tenantWhere(members, ctx), accessibleBranchesWhere(members, ctx), isNull(members.deletedAt)))
     .returning();
 
   if (!updated) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
 
   await auditLog({
-    organizationId: orgId,
-    actorId,
+    organizationId: ctx.organizationId,
+    actorId: ctx.userId,
     action: AuditAction.MEMBER_UPDATED,
     entityType: 'member',
     entityId: memberId,
@@ -454,10 +464,9 @@ export async function updateMemberService(
 // ── Update Member Status ──────────────────────────────────────────────────────
 
 export async function updateMemberStatusService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
   status: string,
-  actorId: string,
 ) {
   const allowedStatuses = ['ACTIVE', 'INACTIVE', 'FROZEN', 'EXPIRED', 'ARCHIVED'] as const;
   if (!allowedStatuses.includes(status as (typeof allowedStatuses)[number])) {
@@ -467,21 +476,21 @@ export async function updateMemberStatusService(
   const [updated] = await db
     .update(members)
     .set({ status: status as any, updatedAt: new Date() })
-    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId), isNull(members.deletedAt)))
+    .where(and(eq(members.id, memberId), tenantWhere(members, ctx), accessibleBranchesWhere(members, ctx), isNull(members.deletedAt)))
     .returning({ id: members.id, status: members.status });
 
   if (!updated) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
 
   await auditLog({
-    organizationId: orgId,
-    actorId,
+    organizationId: ctx.organizationId,
+    actorId: ctx.userId,
     action: AuditAction.MEMBER_STATUS_CHANGED,
     entityType: 'member',
     entityId: memberId,
     description: `Status changed to ${status}`,
   });
 
-  syncMemberBiometricAccessService(orgId, memberId)
+  syncMemberBiometricAccessService(ctx, memberId)
     .catch((err: any) => log.error({ err, memberId }, 'Failed to sync biometric access after status change'));
 
   return updated;
@@ -490,22 +499,21 @@ export async function updateMemberStatusService(
 // ── Delete Member ─────────────────────────────────────────────────────────────
 
 export async function deleteMemberService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
-  actorId: string,
   deletionReason?: string,
 ) {
   const [updated] = await db
     .update(members)
-    .set({ deletedAt: new Date(), deletedBy: actorId, deletionReason, status: 'INACTIVE', updatedAt: new Date() })
-    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId), isNull(members.deletedAt)))
+    .set({ deletedAt: new Date(), deletedBy: ctx.userId, deletionReason, status: 'INACTIVE', updatedAt: new Date() })
+    .where(and(eq(members.id, memberId), tenantWhere(members, ctx), accessibleBranchesWhere(members, ctx), isNull(members.deletedAt)))
     .returning({ id: members.id, status: members.status });
 
   if (!updated) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
 
   await auditLog({
-    organizationId: orgId,
-    actorId,
+    organizationId: ctx.organizationId,
+    actorId: ctx.userId,
     action: AuditAction.MEMBER_STATUS_CHANGED,
     entityType: 'member',
     entityId: memberId,
@@ -532,7 +540,7 @@ export async function deleteMemberService(
       .where(eq(biometricIdentities.memberId, memberId));
     
     for (const identity of identities) {
-      await deleteBiometricIdentityService(orgId, identity.id).catch(err => {
+      await deleteBiometricIdentityService(ctx, identity.id).catch(err => {
         log.error({ err, memberId, identityId: identity.id }, 'Failed to delete biometric identity on device');
       });
     }
@@ -546,9 +554,8 @@ export async function deleteMemberService(
 // ── Hard Delete Member ────────────────────────────────────────────────────────
 
 export async function hardDeleteMemberService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
-  actorId: string,
 ) {
   // Completely remove from biometric devices before hard delete (cascade will remove local mappings but not physical devices)
   try {
@@ -557,7 +564,7 @@ export async function hardDeleteMemberService(
       .where(eq(biometricIdentities.memberId, memberId));
     
     for (const identity of identities) {
-      await deleteBiometricIdentityService(orgId, identity.id).catch(err => {
+      await deleteBiometricIdentityService(ctx, identity.id).catch(err => {
         log.error({ err, memberId, identityId: identity.id }, 'Failed to delete biometric identity on device during hard delete');
       });
     }
@@ -567,14 +574,14 @@ export async function hardDeleteMemberService(
 
   const [deleted] = await db
     .delete(members)
-    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId)))
+    .where(and(eq(members.id, memberId), tenantWhere(members, ctx), accessibleBranchesWhere(members, ctx)))
     .returning({ id: members.id });
 
   if (!deleted) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
 
   await auditLog({
-    organizationId: orgId,
-    actorId,
+    organizationId: ctx.organizationId,
+    actorId: ctx.userId,
     action: AuditAction.MEMBER_DELETED,
     entityType: 'member',
     entityId: memberId,
@@ -587,10 +594,10 @@ export async function hardDeleteMemberService(
 // ── Deletion Summary ──────────────────────────────────────────────────────────
 
 export async function getMemberDeletionSummaryService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
 ) {
-  const [memberExists] = await db.select({ id: members.id }).from(members).where(and(eq(members.id, memberId), eq(members.organizationId, orgId)));
+  const [memberExists] = await db.select({ id: members.id }).from(members).where(and(eq(members.id, memberId), tenantWhere(members, ctx), accessibleBranchesWhere(members, ctx)));
   if (!memberExists) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
 
   const [membershipsCount] = await db.select({ count: count() }).from(memberMemberships).where(eq(memberMemberships.memberId, memberId));
@@ -612,8 +619,8 @@ export async function getMemberDeletionSummaryService(
 
 // ── Member Activity Timeline ──────────────────────────────────────────────────
 
-export async function getMemberActivityService(orgId: string, memberId: string) {
-  await getMemberService(orgId, memberId); // validates access
+export async function getMemberActivityService(ctx: TenantContext, memberId: string) {
+  await getMemberService(ctx, memberId); // validates access
 
   // Gather events from multiple sources and merge
   const [attendances, payments, membershipEvts] = await Promise.all([
@@ -654,8 +661,8 @@ export async function getMemberActivityService(orgId: string, memberId: string) 
 
 // ── Member Measurements ───────────────────────────────────────────────────────
 
-export async function getMemberMeasurementsService(orgId: string, memberId: string) {
-  await getMemberService(orgId, memberId);
+export async function getMemberMeasurementsService(ctx: TenantContext, memberId: string) {
+  await getMemberService(ctx, memberId);
 
   return db
     .select()
@@ -665,16 +672,15 @@ export async function getMemberMeasurementsService(orgId: string, memberId: stri
 }
 
 export async function addMemberMeasurementService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
   data: Omit<typeof memberMeasurements.$inferInsert, 'id' | 'memberId' | 'createdAt'>,
-  actorId: string,
 ) {
-  await getMemberService(orgId, memberId); // validate
+  await getMemberService(ctx, memberId); // validate
 
   const [measurement] = await db
     .insert(memberMeasurements)
-    .values({ ...data, memberId, recordedBy: actorId })
+    .values({ ...data, memberId, recordedBy: ctx.userId })
     .returning();
 
   return measurement;
@@ -682,8 +688,8 @@ export async function addMemberMeasurementService(
 
 // ── Health Profile ────────────────────────────────────────────────────────────
 
-export async function getMemberHealthProfileService(orgId: string, memberId: string) {
-  await getMemberService(orgId, memberId);
+export async function getMemberHealthProfileService(ctx: TenantContext, memberId: string) {
+  await getMemberService(ctx, memberId);
 
   const [health] = await db
     .select()
@@ -695,12 +701,11 @@ export async function getMemberHealthProfileService(orgId: string, memberId: str
 }
 
 export async function updateMemberHealthProfileService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
   data: Partial<typeof memberHealthProfiles.$inferInsert>,
-  actorId: string,
 ) {
-  await getMemberService(orgId, memberId);
+  await getMemberService(ctx, memberId);
 
   const [existing] = await db
     .select({ id: memberHealthProfiles.id })
@@ -715,8 +720,8 @@ export async function updateMemberHealthProfileService(
       .where(eq(memberHealthProfiles.id, existing.id))
       .returning();
     await auditLog({
-      organizationId: orgId,
-      actorId,
+      organizationId: ctx.organizationId,
+      actorId: ctx.userId,
       action: AuditAction.MEMBER_UPDATED,
       entityType: 'member',
       entityId: memberId,
@@ -729,8 +734,8 @@ export async function updateMemberHealthProfileService(
       .values({ memberId, ...data })
       .returning();
     await auditLog({
-      organizationId: orgId,
-      actorId,
+      organizationId: ctx.organizationId,
+      actorId: ctx.userId,
       action: AuditAction.MEMBER_UPDATED,
       entityType: 'member',
       entityId: memberId,
@@ -743,17 +748,16 @@ export async function updateMemberHealthProfileService(
 // ── Upload Member Photo ───────────────────────────────────────────────────────
 
 export async function uploadMemberPhotoService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
   fileBuffer: Buffer,
   filename: string,
-  actorId: string,
 ) {
-  await getMemberService(orgId, memberId);
+  await getMemberService(ctx, memberId);
 
   const ext = path.extname(filename).toLowerCase() || '.jpg';
-  // Key format: avatars/<orgId>/<memberId>-<timestamp><ext>
-  const photoKey = `avatars/${orgId}/${memberId}-${Date.now()}${ext}`;
+  // Key format: avatars/<ctx.organizationId>/<memberId>-<timestamp><ext>
+  const photoKey = `avatars/${ctx.organizationId}/${memberId}-${Date.now()}${ext}`;
 
   const { uploadFileToS3 } = await import('../../common/storage/s3');
   const mimeType = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
@@ -766,8 +770,8 @@ export async function uploadMemberPhotoService(
     .where(eq(members.id, memberId));
 
   await auditLog({
-    organizationId: orgId,
-    actorId,
+    organizationId: ctx.organizationId,
+    actorId: ctx.userId,
     action: AuditAction.MEMBER_PHOTO_UPLOADED,
     entityType: 'member',
     entityId: memberId,
@@ -780,11 +784,10 @@ export async function uploadMemberPhotoService(
 // ── Delete Member Photo ───────────────────────────────────────────────────────
 
 export async function deleteMemberPhotoService(
-  orgId: string,
+  ctx: TenantContext,
   memberId: string,
-  actorId: string,
 ) {
-  const member = await getMemberService(orgId, memberId);
+  const member = await getMemberService(ctx, memberId);
   if (!member.photoUrl) {
     return { success: true };
   }
@@ -812,8 +815,8 @@ export async function deleteMemberPhotoService(
     .where(eq(members.id, memberId));
 
   await auditLog({
-    organizationId: orgId,
-    actorId,
+    organizationId: ctx.organizationId,
+    actorId: ctx.userId,
     action: AuditAction.MEMBER_UPDATED,
     entityType: 'member',
     entityId: memberId,
@@ -825,7 +828,7 @@ export async function deleteMemberPhotoService(
 
 // ── Access Status ─────────────────────────────────────────────────────────────
 
-export async function getMemberAccessStatusService(orgId: string, memberId: string, tx: any = db) {
+export async function getMemberAccessStatusService(ctx: TenantContext, memberId: string, tx: any = db) {
   const [member] = await tx
     .select({
       id: members.id,
@@ -835,7 +838,7 @@ export async function getMemberAccessStatusService(orgId: string, memberId: stri
     })
     .from(members)
     .innerJoin(organizations, eq(organizations.id, members.organizationId))
-    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId)))
+    .where(and(eq(members.id, memberId), tenantWhere(members, ctx), accessibleBranchesWhere(members, ctx)))
     .limit(1);
 
   if (!member || member.deletedAt) {

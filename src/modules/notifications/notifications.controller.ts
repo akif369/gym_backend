@@ -15,7 +15,7 @@ export const notificationsController = {
 
     const requestKey = request.headers['idempotency-key'];
     const delivery = await sendTextMessage({
-      organizationId: request.user.orgId,
+      ctx: request.user,
       eventType: 'MANUAL',
       phone: body.number,
       text: body.text.trim(),

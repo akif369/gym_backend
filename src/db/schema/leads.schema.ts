@@ -66,6 +66,10 @@ export const leads = pgTable('leads', {
 
 export const leadActivities = pgTable('lead_activities', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id')
+    .notNull()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  branchId: uuid('branch_id'),
   leadId: uuid('lead_id')
     .notNull()
     .references(() => leads.id, { onDelete: 'cascade' }),
@@ -76,7 +80,12 @@ export const leadActivities = pgTable('lead_activities', {
   scheduledAt: timestamp('scheduled_at', { withTimezone: true }),
   completedAt: timestamp('completed_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [
+  foreignKey({
+    columns: [table.branchId, table.organizationId],
+    foreignColumns: [branches.id, branches.organizationId],
+  }),
+]);
 
 // ── Type Exports ──────────────────────────────────────────────────────────────
 

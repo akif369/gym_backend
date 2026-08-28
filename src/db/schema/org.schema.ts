@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, integer, boolean, jsonb, pgEnum, uniqueIndex, unique, check } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, text, timestamp, integer, boolean, jsonb, pgEnum, uniqueIndex, unique, check, foreignKey } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ export const settings = pgTable('settings', {
   organizationId: uuid('organization_id')
   .notNull()
   .references(() => organizations.id, { onDelete: 'cascade' }),
-  branchId: uuid('branch_id').references(() => branches.id, { onDelete: 'cascade' }), // NULL = org-wide setting
+  branchId: uuid('branch_id'), // NULL = org-wide setting. references branches(id, organization_id) separately
   category: text('category').notNull(), // 'gym-profile' | 'attendance' | 'tax' | 'invoice' | 'hardware'
   value: jsonb('value').notNull().default('{}'),
   updatedBy: uuid('updated_by'),
@@ -87,6 +87,10 @@ export const settings = pgTable('settings', {
   // Using conditional unique index for org-level and standard unique for branch-level:
   uniqueIndex('settings_org_category_unique').on(table.organizationId, table.category).where(sql`${table.branchId} IS NULL`),
   uniqueIndex('settings_org_branch_category_unique').on(table.organizationId, table.branchId, table.category).where(sql`${table.branchId} IS NOT NULL`),
+  foreignKey({
+    columns: [table.branchId, table.organizationId],
+    foreignColumns: [branches.id, branches.organizationId],
+  }).onDelete('cascade'),
 ]);
 
 // ── Type Exports ──────────────────────────────────────────────────────────────

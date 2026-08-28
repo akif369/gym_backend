@@ -99,6 +99,10 @@ export const biometricEvents = pgTable('biometric_events', {
 
 export const biometricIdentities = pgTable('biometric_identities', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id')
+    .notNull()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  branchId: uuid('branch_id'),
   memberId: uuid('member_id')
     .notNull()
     .references(() => members.id, { onDelete: 'cascade' }),
@@ -111,7 +115,12 @@ export const biometricIdentities = pgTable('biometric_identities', {
   lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [
+  foreignKey({
+    columns: [table.branchId, table.organizationId],
+    foreignColumns: [branches.id, branches.organizationId],
+  }),
+]);
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
@@ -121,6 +130,7 @@ export const biometricDeviceCommands = pgTable('biometric_device_commands', {
   organizationId: uuid('organization_id')
     .notNull()
     .references(() => organizations.id, { onDelete: 'cascade' }),
+  branchId: uuid('branch_id'),
   deviceId: uuid('device_id')
     .notNull()
     .references(() => biometricDevices.id, { onDelete: 'cascade' }),
@@ -130,7 +140,12 @@ export const biometricDeviceCommands = pgTable('biometric_device_commands', {
   sentAt: timestamp('sent_at', { withTimezone: true }),
   completedAt: timestamp('completed_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [
+  foreignKey({
+    columns: [table.branchId, table.organizationId],
+    foreignColumns: [branches.id, branches.organizationId],
+  }),
+]);
 
 // ── Type Exports ──────────────────────────────────────────────────────────────
 

@@ -454,7 +454,7 @@ export async function sendInvoiceWhatsAppService(orgId: string, invoiceId: strin
     const publicInvoice = await getPublicInvoiceService(invoice.publicToken);
     const pdfBuffer = await generateInvoicePdfBuffer(publicInvoice);
     delivery = await sendMediaMessage({
-      organizationId: orgId,
+      ctx: { organizationId: orgId } as any,
       memberId: member.id,
       invoiceId: invoice.id,
       eventType: 'INVOICE',
@@ -467,7 +467,7 @@ export async function sendInvoiceWhatsAppService(orgId: string, invoiceId: strin
     });
   } else {
     delivery = await sendTextMessage({
-      organizationId: orgId,
+      ctx: { organizationId: orgId } as any,
       memberId: member.id,
       invoiceId: invoice.id,
       eventType: 'INVOICE',

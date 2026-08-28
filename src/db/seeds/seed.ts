@@ -229,27 +229,27 @@ async function seed() {
   }
 
   // ── 9. Trainer Assignments ────────────────────────────────────────────────
-  await db.insert(trainerAssignments).values({ trainerId: trainer1!.id, memberId: memberRows[0]!.id, assignedBy: admin!.id });
-  await db.insert(trainerAssignments).values({ trainerId: trainer1!.id, memberId: memberRows[2]!.id, assignedBy: admin!.id });
-  await db.insert(trainerAssignments).values({ trainerId: trainer1!.id, memberId: memberRows[4]!.id, assignedBy: admin!.id });
-  await db.insert(trainerAssignments).values({ trainerId: trainer2!.id, memberId: memberRows[1]!.id, assignedBy: admin!.id });
+  await db.insert(trainerAssignments).values({ organizationId: org!.id, branchId: branch1!.id, trainerId: trainer1!.id, memberId: memberRows[0]!.id, assignedBy: admin!.id });
+  await db.insert(trainerAssignments).values({ organizationId: org!.id, branchId: branch1!.id, trainerId: trainer1!.id, memberId: memberRows[2]!.id, assignedBy: admin!.id });
+  await db.insert(trainerAssignments).values({ organizationId: org!.id, branchId: branch1!.id, trainerId: trainer1!.id, memberId: memberRows[4]!.id, assignedBy: admin!.id });
+  await db.insert(trainerAssignments).values({ organizationId: org!.id, branchId: branch1!.id, trainerId: trainer2!.id, memberId: memberRows[1]!.id, assignedBy: admin!.id });
 
   // ── 10. Memberships ────────────────────────────────────────────────────────
   log.info('Seeding memberships...');
-  const [mem1] = await db.insert(memberMemberships).values({ memberId: memberRows[0]!.id, planId: plan2!.id, planName: 'Monthly Pro', startDate: '2026-07-01', endDate: '2026-07-31', status: 'ACTIVE', ptSessionsTotal: 2, createdBy: admin!.id }).returning();
-  await db.insert(membershipEvents).values({ membershipId: mem1!.id, memberId: memberRows[0]!.id, eventType: 'CREATED', actorId: admin!.id, actorName: 'Admin' });
-  await db.insert(membershipEvents).values({ membershipId: mem1!.id, memberId: memberRows[0]!.id, eventType: 'ACTIVATED', actorId: admin!.id, actorName: 'Admin' });
+  const [mem1] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[0]!.id, planId: plan2!.id, planName: 'Monthly Pro', startDate: '2026-07-01', endDate: '2026-07-31', status: 'ACTIVE', ptSessionsTotal: 2, createdBy: admin!.id }).returning();
+  await db.insert(membershipEvents).values({ organizationId: org!.id, branchId: branch1!.id, membershipId: mem1!.id, memberId: memberRows[0]!.id, eventType: 'CREATED', actorId: admin!.id, actorName: 'Admin' });
+  await db.insert(membershipEvents).values({ organizationId: org!.id, branchId: branch1!.id, membershipId: mem1!.id, memberId: memberRows[0]!.id, eventType: 'ACTIVATED', actorId: admin!.id, actorName: 'Admin' });
 
-  const [mem2] = await db.insert(memberMemberships).values({ memberId: memberRows[1]!.id, planId: plan3!.id, planName: 'Quarterly Gold', startDate: '2026-05-01', endDate: '2026-07-29', status: 'ACTIVE', ptSessionsTotal: 6, createdBy: admin!.id }).returning();
-  await db.insert(membershipEvents).values({ membershipId: mem2!.id, memberId: memberRows[1]!.id, eventType: 'CREATED', actorId: admin!.id, actorName: 'Admin' });
+  const [mem2] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[1]!.id, planId: plan3!.id, planName: 'Quarterly Gold', startDate: '2026-05-01', endDate: '2026-07-29', status: 'ACTIVE', ptSessionsTotal: 6, createdBy: admin!.id }).returning();
+  await db.insert(membershipEvents).values({ organizationId: org!.id, branchId: branch1!.id, membershipId: mem2!.id, memberId: memberRows[1]!.id, eventType: 'CREATED', actorId: admin!.id, actorName: 'Admin' });
 
-  const [mem3] = await db.insert(memberMemberships).values({ memberId: memberRows[2]!.id, planId: plan5!.id, planName: 'Yearly Platinum', startDate: '2025-11-10', endDate: '2026-11-10', status: 'ACTIVE', ptSessionsTotal: 36, createdBy: admin!.id }).returning();
-  await db.insert(membershipEvents).values({ membershipId: mem3!.id, memberId: memberRows[2]!.id, eventType: 'CREATED', actorId: admin!.id, actorName: 'Admin' });
+  const [mem3] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[2]!.id, planId: plan5!.id, planName: 'Yearly Platinum', startDate: '2025-11-10', endDate: '2026-11-10', status: 'ACTIVE', ptSessionsTotal: 36, createdBy: admin!.id }).returning();
+  await db.insert(membershipEvents).values({ organizationId: org!.id, branchId: branch1!.id, membershipId: mem3!.id, memberId: memberRows[2]!.id, eventType: 'CREATED', actorId: admin!.id, actorName: 'Admin' });
 
-  const [mem4] = await db.insert(memberMemberships).values({ memberId: memberRows[3]!.id, planId: plan1!.id, planName: 'Monthly Basic', startDate: '2026-06-01', endDate: '2026-06-30', status: 'EXPIRED', ptSessionsTotal: 0, createdBy: admin!.id }).returning();
-  await db.insert(membershipEvents).values({ membershipId: mem4!.id, memberId: memberRows[3]!.id, eventType: 'CREATED', actorId: admin!.id, actorName: 'Admin' });
+  const [mem4] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[3]!.id, planId: plan1!.id, planName: 'Monthly Basic', startDate: '2026-06-01', endDate: '2026-06-30', status: 'EXPIRED', ptSessionsTotal: 0, createdBy: admin!.id }).returning();
+  await db.insert(membershipEvents).values({ organizationId: org!.id, branchId: branch1!.id, membershipId: mem4!.id, memberId: memberRows[3]!.id, eventType: 'CREATED', actorId: admin!.id, actorName: 'Admin' });
 
-  const [mem5] = await db.insert(memberMemberships).values({ memberId: memberRows[4]!.id, planId: plan4!.id, planName: 'Half-Yearly Elite', startDate: '2026-01-15', endDate: '2026-07-14', status: 'ACTIVE', ptSessionsTotal: 15, createdBy: admin!.id }).returning();
+  const [mem5] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[4]!.id, planId: plan4!.id, planName: 'Half-Yearly Elite', startDate: '2026-01-15', endDate: '2026-07-14', status: 'ACTIVE', ptSessionsTotal: 15, createdBy: admin!.id }).returning();
 
   // ── 11. Attendance ─────────────────────────────────────────────────────────
   log.info('Seeding attendance...');
@@ -277,7 +277,7 @@ async function seed() {
   // ── 14. Leads ──────────────────────────────────────────────────────────────
   log.info('Seeding leads...');
   const [lead1] = await db.insert(leads).values({ organizationId: org!.id, branchId: branch1!.id, name: 'Sanjay Kumar', phone: '9876500001', source: 'INSTAGRAM', status: 'TRIAL_BOOKED', notes: 'Interested in weight loss program', createdBy: admin!.id }).returning();
-  await db.insert(leadActivities).values({ leadId: lead1!.id, activityType: 'CALL', notes: 'Called and scheduled trial session', actorId: admin!.id, actorName: 'Admin' });
+  await db.insert(leadActivities).values({ organizationId: org!.id, branchId: branch1!.id, leadId: lead1!.id, activityType: 'CALL', notes: 'Discussed pricing, seems interested.', actorId: admin!.id, actorName: 'Admin' });
   await db.insert(leads).values({ organizationId: org!.id, branchId: branch2!.id, name: 'Meena Pillai', phone: '9876500002', source: 'WALK_IN', status: 'CONTACTED', notes: 'Came in for pricing info', createdBy: admin!.id });
   await db.insert(leads).values({ organizationId: org!.id, branchId: branch3!.id, name: 'Rohan Das', phone: '9876500003', source: 'GOOGLE', status: 'JOINED', notes: 'Converted to Quarterly Gold', createdBy: admin!.id });
   await db.insert(leads).values({ organizationId: org!.id, branchId: branch1!.id, name: 'Aisha Khan', phone: '9876500004', source: 'REFERRAL', status: 'TRIAL_COMPLETED', notes: 'Referred by Arjun Verma', createdBy: admin!.id });

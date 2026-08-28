@@ -1,19 +1,20 @@
 import { db } from '../../db/index';
+import { TenantContext, tenantWhere, accessibleBranchesWhere } from '../../common/auth/tenant';
 import { trainers, trainerAssignments } from '../../db/schema/trainers.schema';
 import { members } from '../../db/schema/members.schema';
 import { ptSessions } from '../../db/schema/pt.schema';
-import { eq, and, isNull, count, ilike, or } from 'drizzle-orm';
+import { eq, and, isNull, count, ilike, or, gt, lt } from 'drizzle-orm';
 import { AppError, ErrorCode } from '../../common/errors/AppError';
 import { parsePagination, paginationToLimitOffset, buildPaginatedResponse } from '../../common/pagination/paginate';
 import { createLogger } from '../../common/logger/index';
 
 const log = createLogger('trainers-service');
 
-export async function listTrainersService(orgId: string, query: Record<string, unknown>) {
+export async function listTrainersService(ctx: TenantContext, query: Record<string, unknown>) {
   const { page, pageSize } = parsePagination(query);
   const { limit, offset } = paginationToLimitOffset({ page, pageSize });
   const search = query['search'] as string | undefined;
-  const conditions: any[] = [eq(trainers.organizationId, orgId), isNull(trainers.deletedAt)];
+  const conditions: any[] = [tenantWhere(trainers, ctx), accessibleBranchesWhere(trainers, ctx), isNull(trainers.deletedAt)];
   if (search) conditions.push(or(ilike(trainers.name, `%${search}%`), ilike(trainers.specialization!, `%${search}%`)));
   const whereClause = and(...conditions);
   const res = await db.select({ total: count() }).from(trainers).where(whereClause);
@@ -22,42 +23,42 @@ export async function listTrainersService(orgId: string, query: Record<string, u
   return buildPaginatedResponse(items, total, { page, pageSize });
 }
 
-export async function createTrainerService(orgId: string, data: any) {
-  const [trainer] = await db.insert(trainers).values({ ...data, organizationId: orgId }).returning();
+export async function createTrainerService(ctx: TenantContext, data: any) {
+  const [trainer] = await db.insert(trainers).values({ ...data, organizationId: ctx.organizationId }).returning();
   log.info({ trainerId: trainer!.id }, 'Trainer created');
   return trainer;
 }
 
-export async function getTrainerService(orgId: string, trainerId: string) {
+export async function getTrainerService(ctx: TenantContext, trainerId: string) {
   const [trainer] = await db.select().from(trainers)
-    .where(and(eq(trainers.id, trainerId), eq(trainers.organizationId, orgId), isNull(trainers.deletedAt)))
+    .where(and(eq(trainers.id, trainerId), tenantWhere(trainers, ctx), accessibleBranchesWhere(trainers, ctx), isNull(trainers.deletedAt)))
     .limit(1);
   if (!trainer) throw AppError.notFound(ErrorCode.TRAINER_NOT_FOUND, 'Trainer not found');
   return trainer;
 }
 
-export async function updateTrainerService(orgId: string, trainerId: string, data: any) {
-  await getTrainerService(orgId, trainerId);
+export async function updateTrainerService(ctx: TenantContext, trainerId: string, data: any) {
+  await getTrainerService(ctx, trainerId);
   const [updated] = await db.update(trainers).set({ ...data, updatedAt: new Date() }).where(eq(trainers.id, trainerId)).returning();
   return updated;
 }
 
-export async function updateTrainerStatusService(orgId: string, trainerId: string, status: string) {
-  await getTrainerService(orgId, trainerId);
+export async function updateTrainerStatusService(ctx: TenantContext, trainerId: string, status: string) {
+  await getTrainerService(ctx, trainerId);
   const [updated] = await db.update(trainers).set({ status: status as any, updatedAt: new Date() }).where(eq(trainers.id, trainerId)).returning({ id: trainers.id, status: trainers.status });
   return updated;
 }
 
-export async function getTrainerMembersService(orgId: string, trainerId: string) {
-  await getTrainerService(orgId, trainerId);
+export async function getTrainerMembersService(ctx: TenantContext, trainerId: string) {
+  await getTrainerService(ctx, trainerId);
   return db.select({ member: members, assignment: trainerAssignments })
     .from(trainerAssignments)
     .innerJoin(members, eq(members.id, trainerAssignments.memberId))
     .where(and(eq(trainerAssignments.trainerId, trainerId), isNull(trainerAssignments.unassignedAt), isNull(members.deletedAt)));
 }
 
-export async function assignMembersService(orgId: string, trainerId: string, memberIds: string[], actorId: string) {
-  await getTrainerService(orgId, trainerId);
+export async function assignMembersService(ctx: TenantContext, trainerId: string, memberIds: string[], actorId: string) {
+  await getTrainerService(ctx, trainerId);
   const inserted = [];
   for (const memberId of memberIds) {
     // Check not already assigned
@@ -65,22 +66,22 @@ export async function assignMembersService(orgId: string, trainerId: string, mem
       .where(and(eq(trainerAssignments.trainerId, trainerId), eq(trainerAssignments.memberId, memberId), isNull(trainerAssignments.unassignedAt)))
       .limit(1);
     if (!existing) {
-      const [a] = await db.insert(trainerAssignments).values({ trainerId, memberId, assignedBy: actorId }).returning();
+      const [a] = await db.insert(trainerAssignments).values({ organizationId: ctx.organizationId, branchId: ctx.activeBranchId, trainerId, memberId, assignedBy: actorId }).returning();
       inserted.push(a);
     }
   }
   return inserted;
 }
 
-export async function removeTrainerMemberService(orgId: string, trainerId: string, memberId: string, _actorId: string) {
-  await getTrainerService(orgId, trainerId);
+export async function removeTrainerMemberService(ctx: TenantContext, trainerId: string, memberId: string, _actorId: string) {
+  await getTrainerService(ctx, trainerId);
   await db.update(trainerAssignments)
     .set({ unassignedAt: new Date() })
     .where(and(eq(trainerAssignments.trainerId, trainerId), eq(trainerAssignments.memberId, memberId), isNull(trainerAssignments.unassignedAt)));
 }
 
-export async function getTrainerPerformanceService(orgId: string, trainerId: string) {
-  const trainer = await getTrainerService(orgId, trainerId);
+export async function getTrainerPerformanceService(ctx: TenantContext, trainerId: string) {
+  const trainer = await getTrainerService(ctx, trainerId);
   const mRes = await db
     .select({ memberCount: count() }).from(trainerAssignments)
     .where(and(eq(trainerAssignments.trainerId, trainerId), isNull(trainerAssignments.unassignedAt)));
@@ -107,7 +108,7 @@ export async function getTrainerPerformanceService(orgId: string, trainerId: str
   };
 }
 
-export async function getTrainerDashboardService(orgId: string, trainerUserId: string) {
+export async function getTrainerDashboardService(ctx: TenantContext, trainerUserId: string) {
   const [trainer] = await db.select().from(trainers).where(and(eq(trainers.userId, trainerUserId), isNull(trainers.deletedAt))).limit(1);
   if (!trainer) throw AppError.notFound(ErrorCode.TRAINER_NOT_FOUND, 'Trainer profile not found');
 
@@ -125,10 +126,10 @@ export async function getTrainerDashboardService(orgId: string, trainerUserId: s
   const todaySessionsRes = await db.select().from(ptSessions)
     .where(and(
       eq(ptSessions.trainerId, trainer.id),
-      gt(ptSessions.startTime, today),
-      lt(ptSessions.startTime, tomorrow)
+      gt(ptSessions.scheduledAt, today),
+      lt(ptSessions.scheduledAt, tomorrow)
     ))
-    .orderBy(ptSessions.startTime);
+    .orderBy(ptSessions.scheduledAt);
 
   const topClientsRes = await db.select({ member: members }).from(trainerAssignments).innerJoin(members, eq(members.id, trainerAssignments.memberId)).where(and(eq(trainerAssignments.trainerId, trainer.id), isNull(trainerAssignments.unassignedAt))).limit(5);
 
@@ -147,7 +148,7 @@ export async function getTrainerDashboardService(orgId: string, trainerUserId: s
     todaySessions: todaySessionsRes.map((s: any) => ({
       id: s.id,
       client: 'Client ' + s.memberId.substring(0, 4),
-      time: new Date(s.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      time: new Date(s.scheduledAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       duration: s.durationMinutes + ' min',
       type: s.sessionType || 'PT',
       status: s.status,

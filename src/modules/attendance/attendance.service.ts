@@ -11,16 +11,15 @@ import { AuditAction } from '../../db/schema/audit.schema';
 import { createLogger } from '../../common/logger/index';
 import { isStrictPaymentPolicyEnabled } from '../org/org.service';
 import { istDayStart, istDayEnd } from '../../common/utils/timezone';
+import { TenantContext, tenantWhere, accessibleBranchesWhere, assertBranchAccess } from '../../common/auth/tenant';
 
 const log = createLogger('attendance-service');
 
 // ── Check-In ──────────────────────────────────────────────────────────────────
 
 export async function checkInService(
-  orgId: string,
-  branchId: string | undefined,
-  data: { memberId?: string; memberNumber?: string; method?: string; notes?: string },
-  actorId?: string,
+  ctx: TenantContext,
+  data: { memberId?: string; memberNumber?: string; method?: string; notes?: string; branchId?: string },
 ) {
   // Resolve member
   let member;
@@ -28,19 +27,24 @@ export async function checkInService(
     const [m] = await db
       .select()
       .from(members)
-      .where(and(eq(members.id, data.memberId), eq(members.organizationId, orgId), isNull(members.deletedAt)))
+      .where(and(eq(members.id, data.memberId), tenantWhere(members, ctx), accessibleBranchesWhere(members, ctx), isNull(members.deletedAt)))
       .limit(1);
     member = m;
   } else if (data.memberNumber) {
     const [m] = await db
       .select()
       .from(members)
-      .where(and(eq(members.memberNumber, data.memberNumber), eq(members.organizationId, orgId), isNull(members.deletedAt)))
+      .where(and(eq(members.memberNumber, data.memberNumber), tenantWhere(members, ctx), accessibleBranchesWhere(members, ctx), isNull(members.deletedAt)))
       .limit(1);
     member = m;
   }
 
   if (!member) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
+  
+  const branchId = data.branchId || member.branchId || ctx.activeBranchId;
+  if (branchId) {
+    assertBranchAccess(ctx, branchId);
+  }
 
   // Prevent duplicate active check-in
   const [activeSession] = await db
@@ -65,7 +69,7 @@ export async function checkInService(
     .where(and(eq(memberMemberships.memberId, member.id), eq(memberMemberships.status, 'ACTIVE')))
     .limit(1);
 
-  const strictPaymentPolicy = await isStrictPaymentPolicyEnabled(orgId);
+  const strictPaymentPolicy = await isStrictPaymentPolicyEnabled(ctx.organizationId);
   let latestPaymentStatus: string | null = null;
   let latestPayment: { status: string; createdAt: Date } | undefined;
   if (strictPaymentPolicy) {
@@ -74,7 +78,7 @@ export async function checkInService(
       .from(paymentTransactions)
       .where(and(
         eq(paymentTransactions.memberId, member.id),
-        eq(paymentTransactions.organizationId, orgId),
+        tenantWhere(paymentTransactions, ctx),
       ))
       .orderBy(desc(paymentTransactions.createdAt))
       .limit(1);
@@ -104,20 +108,20 @@ export async function checkInService(
   const [log_] = await db
     .insert(attendanceLogs)
     .values({
-      organizationId: orgId,
-      branchId,
+      organizationId: ctx.organizationId,
+      branchId: branchId,
       memberId: member.id,
       memberName: `${member.firstName} ${member.lastName}`,
       checkInAt: new Date(),
       checkInMethod: (data.method as any) ?? 'MANUAL',
-      checkInBy: actorId,
+      checkInBy: ctx.userId,
       notes: data.notes,
     })
     .returning();
 
   await auditLog({
-    organizationId: orgId,
-    actorId,
+    organizationId: ctx.organizationId,
+    actorId: ctx.userId,
     action: AuditAction.ATTENDANCE_CHECKED_IN,
     entityType: 'attendance',
     entityId: log_!.id,
@@ -131,9 +135,8 @@ export async function checkInService(
 // ── Check-Out ─────────────────────────────────────────────────────────────────
 
 export async function checkOutService(
-  orgId: string,
+  ctx: TenantContext,
   data: { memberId: string; notes?: string },
-  actorId?: string,
 ) {
   const [activeSession] = await db
     .select()
@@ -141,7 +144,8 @@ export async function checkOutService(
     .where(
       and(
         eq(attendanceLogs.memberId, data.memberId),
-        eq(attendanceLogs.organizationId, orgId),
+        tenantWhere(attendanceLogs, ctx),
+        accessibleBranchesWhere(attendanceLogs, ctx),
         isNull(attendanceLogs.checkOutAt),
       ),
     )
@@ -156,7 +160,7 @@ export async function checkOutService(
     .update(attendanceLogs)
     .set({
       checkOutAt: new Date(),
-      checkOutBy: actorId,
+      checkOutBy: ctx.userId,
       notes: data.notes ?? activeSession.notes,
       updatedAt: new Date(),
     })
@@ -164,8 +168,8 @@ export async function checkOutService(
     .returning();
 
   await auditLog({
-    organizationId: orgId,
-    actorId,
+    organizationId: ctx.organizationId,
+    actorId: ctx.userId,
     action: AuditAction.ATTENDANCE_CHECKED_OUT,
     entityType: 'attendance',
     entityId: activeSession.id,
@@ -176,7 +180,7 @@ export async function checkOutService(
 
 // ── Currently Inside ──────────────────────────────────────────────────────────
 
-export async function getCurrentlyInsideService(orgId: string) {
+export async function getCurrentlyInsideService(ctx: TenantContext) {
   const qualifiedColumn = (table: string, column: string) =>
     sql`${sql.identifier(table)}.${sql.identifier(column)}`;
 
@@ -214,7 +218,7 @@ export async function getCurrentlyInsideService(orgId: string) {
     })
     .from(attendanceLogs)
     .leftJoin(members, eq(attendanceLogs.memberId, members.id))
-    .where(and(eq(attendanceLogs.organizationId, orgId), isNull(attendanceLogs.checkOutAt)))
+    .where(and(tenantWhere(attendanceLogs, ctx), accessibleBranchesWhere(attendanceLogs, ctx), isNull(attendanceLogs.checkOutAt)))
     .orderBy(desc(attendanceLogs.checkInAt));
 
   return items.map(item => {
@@ -249,9 +253,9 @@ export async function getCurrentlyInsideService(orgId: string) {
 
 // ── List Attendance ───────────────────────────────────────────────────────────
 
-export async function listAttendanceService(orgId: string, query: Record<string, unknown>) {
+export async function listAttendanceService(ctx: TenantContext, query: Record<string, unknown>) {
   const { cursor, pageSize } = parseCursorPagination(query);
-  const conditions: any[] = [eq(attendanceLogs.organizationId, orgId)];
+  const conditions: any[] = [tenantWhere(attendanceLogs, ctx), accessibleBranchesWhere(attendanceLogs, ctx)];
 
   if (query['date']) {
     const date = query['date'] as string;
@@ -297,16 +301,16 @@ export async function listAttendanceService(orgId: string, query: Record<string,
 // ── Member Attendance History ─────────────────────────────────────────────────
 
 
-export async function getMemberAttendanceService(orgId: string, memberId: string, query: Record<string, unknown>) {
+export async function getMemberAttendanceService(ctx: TenantContext, memberId: string, query: Record<string, unknown>) {
   const [member] = await db.select({ id: members.id }).from(members)
-    .where(and(eq(members.id, memberId), eq(members.organizationId, orgId), isNull(members.deletedAt)))
+    .where(and(eq(members.id, memberId), tenantWhere(members, ctx), accessibleBranchesWhere(members, ctx), isNull(members.deletedAt)))
     .limit(1);
   if (!member) throw AppError.notFound(ErrorCode.MEMBER_NOT_FOUND, 'Member not found');
 
   const { cursor, pageSize } = parseCursorPagination(query);
   const conditions: any[] = [
     eq(attendanceLogs.memberId, memberId),
-    eq(attendanceLogs.organizationId, orgId)
+    tenantWhere(attendanceLogs, ctx)
   ];
 
   const decodedCursor = decodeCursor<[string, string]>(cursor);
@@ -336,21 +340,24 @@ export async function getMemberAttendanceService(orgId: string, memberId: string
 // ── Correct Attendance ─────────────────────────────────────────────────────────
 
 export async function correctAttendanceService(
-  orgId: string,
+  ctx: TenantContext,
   data: { attendanceId: string; checkInAt?: string; checkOutAt?: string; reason: string },
-  actorId: string,
 ) {
   const [log_] = await db
     .select()
     .from(attendanceLogs)
-    .where(and(eq(attendanceLogs.id, data.attendanceId), eq(attendanceLogs.organizationId, orgId)))
+    .where(and(
+      eq(attendanceLogs.id, data.attendanceId),
+      tenantWhere(attendanceLogs, ctx),
+      accessibleBranchesWhere(attendanceLogs, ctx)
+    ))
     .limit(1);
 
   if (!log_) throw AppError.notFound(ErrorCode.ATTENDANCE_NOT_FOUND, 'Attendance record not found');
 
   const updates: any = {
     correctedAt: new Date(),
-    correctedBy: actorId,
+    correctedBy: ctx.userId,
     correctionReason: data.reason,
     updatedAt: new Date(),
   };
@@ -364,8 +371,8 @@ export async function correctAttendanceService(
     .returning();
 
   await auditLog({
-    organizationId: orgId,
-    actorId,
+    organizationId: ctx.organizationId,
+    actorId: ctx.userId,
     action: AuditAction.ATTENDANCE_CORRECTED,
     entityType: 'attendance',
     entityId: data.attendanceId,
@@ -379,14 +386,14 @@ export async function correctAttendanceService(
 
 // ── Analytics: Peak Hours ─────────────────────────────────────────────────────
 
-export async function getPeakHoursService(orgId: string) {
+export async function getPeakHoursService(ctx: TenantContext) {
   const rows = await db
     .select({
       hour: sql<number>`EXTRACT(HOUR FROM check_in_at)`.as('hour'),
       count: count(),
     })
     .from(attendanceLogs)
-    .where(eq(attendanceLogs.organizationId, orgId))
+    .where(and(tenantWhere(attendanceLogs, ctx), accessibleBranchesWhere(attendanceLogs, ctx)))
     .groupBy(sql`EXTRACT(HOUR FROM check_in_at)`)
     .orderBy(sql`EXTRACT(HOUR FROM check_in_at)`);
 
@@ -399,7 +406,7 @@ export async function getPeakHoursService(orgId: string) {
 
 // ── Analytics: Daily ──────────────────────────────────────────────────────────
 
-export async function getDailyAttendanceService(orgId: string, days: number = 30) {
+export async function getDailyAttendanceService(ctx: TenantContext, days: number = 30) {
   const since = new Date();
   since.setDate(since.getDate() - days);
 
@@ -409,7 +416,11 @@ export async function getDailyAttendanceService(orgId: string, days: number = 30
       count: count(),
     })
     .from(attendanceLogs)
-    .where(and(eq(attendanceLogs.organizationId, orgId), gte(attendanceLogs.checkInAt, since)))
+    .where(and(
+      tenantWhere(attendanceLogs, ctx),
+      accessibleBranchesWhere(attendanceLogs, ctx),
+      gte(attendanceLogs.checkInAt, since)
+    ))
     .groupBy(sql`DATE(check_in_at AT TIME ZONE 'Asia/Kolkata')`)
     .orderBy(sql`DATE(check_in_at AT TIME ZONE 'Asia/Kolkata')`);
 

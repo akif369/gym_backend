@@ -9,6 +9,7 @@ import {
   userSessions,
   passwordResetTokens,
   organizations,
+  branches,
   getPortalType,
   staffInviteTokens,
   type UserRoleType,
@@ -340,24 +341,45 @@ export async function getMeService(userId: string) {
       status: users.status,
       lastLoginAt: users.lastLoginAt,
       createdAt: users.createdAt,
-      organizationMode: organizations.organizationMode,
     })
     .from(users)
-    .leftJoin(organizations, eq(users.organizationId, organizations.id))
     .where(and(eq(users.id, userId), isNull(users.deletedAt)))
     .limit(1);
 
   if (!user) throw AppError.notFound(ErrorCode.STAFF_NOT_FOUND, 'User not found');
 
+  const [organization] = await db
+    .select()
+    .from(organizations)
+    .where(eq(organizations.id, user.organizationId))
+    .limit(1);
+
+  const orgBranches = await db
+    .select()
+    .from(branches)
+    .where(eq(branches.organizationId, user.organizationId));
+
+  let accessibleBranchIds: string[] = [];
+  if (user.role === 'ORGANIZATION_OWNER' || user.role === 'OWNER') {
+    accessibleBranchIds = orgBranches.map((b) => b.id);
+  } else if (user.branchId) {
+    accessibleBranchIds = [user.branchId];
+  }
+
+  const accessibleBranches = orgBranches.filter((b) => accessibleBranchIds.includes(b.id));
+
   const permissions = DEFAULT_ROLE_PERMISSIONS[user.role] ?? [];
   let portalType = getPortalType(user.role as UserRoleType);
-  if (user.organizationMode === 'SINGLE_GYM' && portalType === 'org-owner') {
+  if (organization?.organizationMode === 'SINGLE_GYM' && portalType === 'org-owner') {
     portalType = 'branch';
   }
 
   return {
     ...user,
     orgId: user.organizationId,
+    organization,
+    branches: accessibleBranches,
+    accessibleBranchIds,
     permissions,
     portalType,
   };

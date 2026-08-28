@@ -378,54 +378,54 @@ export async function admsDeviceCmd(
 // --- API Endpoints for UI ---
 
 export async function listDevices(req: FastifyRequest, reply: FastifyReply) {
-  const orgId = req.user.orgId;
+  const orgId = req.user;
   const devices = await listDevicesService(orgId);
   return reply.send({ data: devices });
 }
 
 export async function listIdentities(req: FastifyRequest, reply: FastifyReply) {
-  const orgId = req.user.orgId;
+  const orgId = req.user;
   const identities = await listIdentitiesService(orgId);
   return reply.send({ data: identities });
 }
 
 export async function registerDevice(req: FastifyRequest, reply: FastifyReply) {
-  const orgId = req.user.orgId;
+  const orgId = req.user;
   const data = req.body as any;
   const device = await registerDeviceService(orgId, data);
   return reply.send({ data: device });
 }
 
 export async function deleteDevice(req: FastifyRequest, reply: FastifyReply) {
-  const orgId = req.user.orgId;
+  const orgId = req.user;
   const { deviceId } = req.params as any;
   await deleteDeviceService(orgId, deviceId);
   return reply.status(204).send();
 }
 
 export async function deleteIdentity(req: FastifyRequest, reply: FastifyReply) {
-  const orgId = req.user.orgId;
+  const orgId = req.user;
   const { identityId } = req.params as any;
   await deleteBiometricIdentityService(orgId, identityId);
   return reply.status(204).send();
 }
 
 export async function syncMemberToDevice(req: FastifyRequest, reply: FastifyReply) {
-  const orgId = req.user.orgId;
+  const orgId = req.user;
   const { memberId, pin, name, branchId, accessGroup } = req.body as any;
   const result = await syncMemberToBiometricsService(orgId, branchId, memberId, pin, name, accessGroup);
   return reply.send(result);
 }
 
 export async function syncMemberAccess(req: FastifyRequest, reply: FastifyReply) {
-  const orgId = req.user.orgId;
+  const orgId = req.user;
   const { memberId } = req.params as any;
   const result = await syncMemberBiometricAccessService(orgId, memberId, { force: true });
   return reply.send(result);
 }
 
 export async function reconcileBiometrics(req: FastifyRequest, reply: FastifyReply) {
-  const orgId = req.user.orgId;
+  const orgId = req.user;
   const { branchId } = (req.body as any) || {};
   const result = await reconcileBiometricAccessService(orgId, branchId);
   return reply.send(result);
