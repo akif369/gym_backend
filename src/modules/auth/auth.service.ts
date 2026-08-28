@@ -52,13 +52,7 @@ export async function loginService(
     .limit(1);
 
   if (!user) {
-    await auditLog({
-      organizationId: 'unknown',
-      action: AuditAction.LOGIN_FAILED,
-      entityType: 'auth',
-      description: `Failed login attempt for email: ${email}`,
-      ipAddress: meta.ipAddress,
-    });
+    log.warn({ email, ipAddress: meta.ipAddress, action: 'LOGIN_FAILED' }, 'Failed login attempt for unknown user');
     throw AppError.unauthorized(ErrorCode.INVALID_CREDENTIALS, 'Invalid email or password');
   }
 
