@@ -40,7 +40,10 @@ export function branchWhere(table: any, ctx: TenantContext): SQL {
  * Returns a Drizzle ORM condition for records from branches the user is allowed to access.
  */
 export function accessibleBranchesWhere(table: any, ctx: TenantContext): SQL {
-  if (ctx.accessibleBranchIds.length === 0) {
+  if (ctx.role === 'SUPER_ADMIN' || ctx.role === 'SYSTEM') {
+    return eq(table.organizationId, ctx.organizationId);
+  }
+  if (!ctx.accessibleBranchIds || ctx.accessibleBranchIds.length === 0) {
      // Ensure query returns no rows rather than breaking SQL
      return sql`1=0`;
   }

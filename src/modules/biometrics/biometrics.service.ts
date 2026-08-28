@@ -35,16 +35,7 @@ export function currentDateInTimeZone(timeZone: string) {
 import { TenantContext, tenantWhere, accessibleBranchesWhere } from '../../common/auth/tenant';
 
 export async function calculateMemberAccessGroup(ctx: TenantContext, memberId: string, tx: any = db): Promise<number> {
-  const systemCtx: TenantContext = {
-    organizationId: ctx.organizationId,
-    activeBranchId: null,
-    accessibleBranchIds: [],
-    userId: 'SYSTEM',
-    role: 'SUPER_ADMIN',
-    permissions: [],
-    organizationMode: 'SINGLE_GYM', // default dummy
-  };
-  const status = await getMemberAccessStatusService(systemCtx, memberId, tx);
+  const status = await getMemberAccessStatusService(ctx, memberId, tx);
   return status.allowed ? BIOMETRIC_ACCESS_GROUP_ALLOWED : BIOMETRIC_ACCESS_GROUP_DENIED;
 }
 
