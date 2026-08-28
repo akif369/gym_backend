@@ -262,6 +262,7 @@ export async function getOrganizationUsers(orgId: string) {
       status: users.status,
       branchId: users.branchId,
       createdAt: users.createdAt,
+      deletedAt: users.deletedAt,
     })
     .from(users)
     .where(sql`${users.organizationId} = ${orgId} AND ${users.role} != 'MEMBER'`)
@@ -309,4 +310,18 @@ export async function updateAdminUser(userId: string, payload: { firstName?: str
     status: user.status,
     branchId: user.branchId,
   };
+}
+
+export async function deleteAdminUser(userId: string) {
+  // Hard delete the user
+  const [deletedUser] = await db
+    .delete(users)
+    .where(eq(users.id, userId))
+    .returning({ id: users.id });
+
+  if (!deletedUser) {
+    throw AppError.notFound(ErrorCode.STAFF_NOT_FOUND, 'User not found');
+  }
+
+  return { success: true, id: deletedUser.id };
 }

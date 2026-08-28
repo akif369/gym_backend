@@ -79,6 +79,12 @@ export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
     adminController.updateUser as any
   );
 
+  fastify.delete(
+    '/users/:userId',
+    { preHandler: adminAuth, schema: { tags: ['Admin'], summary: 'Permanently delete a user' } },
+    adminController.deleteUser as any
+  );
+
   fastify.get(
     '/audit-logs',
     { preHandler: adminAuth, schema: { tags: ['Admin'], summary: 'View global staff audit logs' } },

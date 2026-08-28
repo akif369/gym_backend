@@ -12,6 +12,7 @@ import {
   getOrganizationUsers,
   getOrganizationMembers,
   updateAdminUser,
+  deleteAdminUser,
 } from './admin.service';
 
 export const adminController = {
@@ -76,5 +77,9 @@ export const adminController = {
 
   async updateUser(req: FastifyRequest<{ Params: { userId: string } }>, reply: FastifyReply) {
     return reply.send({ user: await updateAdminUser(req.params.userId, req.body as any) });
+  },
+
+  async deleteUser(req: FastifyRequest<{ Params: { userId: string } }>, reply: FastifyReply) {
+    return reply.send(await deleteAdminUser(req.params.userId));
   },
 };
