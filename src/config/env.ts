@@ -69,7 +69,7 @@ export const config = {
   nodeEnv: optionalEnv('NODE_ENV', 'development') as 'development' | 'production' | 'test',
   port: optionalEnvNumber('PORT', 3001),
   host: optionalEnv('HOST', '0.0.0.0'),
-  appName: optionalEnv('APP_NAME', 'GymFlow'),
+  appName: optionalEnv('APP_NAME', 'GYMatrix'),
   apiPrefix: optionalEnv('API_PREFIX', '/api/v1'),
   publicApiUrl: optionalEnv('PUBLIC_API_URL', `http://localhost:${optionalEnvNumber('PORT', 3001)}`).replace(/\/$/, ''),
 publicWebUrl: optionalEnv(

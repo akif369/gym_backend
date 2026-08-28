@@ -50,7 +50,7 @@ async function start() {
         apiPrefix: config.apiPrefix,
         docsUrl: `http://localhost:${config.port}/docs`,
       },
-      '🚀 GymFlow API server started',
+      '🚀 GYMatrix API server started',
     );
   } catch (err) {
     logger.fatal({ err }, 'Failed to start server');

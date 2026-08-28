@@ -1,5 +1,5 @@
 /**
- * GymFlow — Database Seed
+ * GYMatrix — Database Seed
  *
  * Seeds:
  *  1. Organization: IronZone Fitness
@@ -124,7 +124,7 @@ async function seed() {
   log.info('Seeding admin user...');
   const adminHash = await hashPw('Admin@123');
   const [admin] = await db.insert(users).values({
-    organizationId: org!.id, branchId: branch1!.id, email: 'admin@ironzone.com', passwordHash: adminHash, role: 'OWNER', firstName: 'Admin', lastName: 'GymFlow', phone: '9900000001', status: 'ACTIVE',
+    organizationId: org!.id, branchId: branch1!.id, email: 'admin@ironzone.com', passwordHash: adminHash, role: 'OWNER', firstName: 'Admin', lastName: 'GYMatrix', phone: '9900000001', status: 'ACTIVE',
   }).returning();
 
   // Manager

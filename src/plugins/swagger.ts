@@ -8,12 +8,12 @@ export async function registerSwagger(fastify: FastifyInstance): Promise<void> {
     openapi: {
       openapi: '3.0.3',
       info: {
-        title: 'GymFlow API',
+        title: 'GYMatrix API',
         description: 'Production-grade Gym Management SaaS REST API',
         version: '1.0.0',
         contact: {
-          name: 'GymFlow Support',
-          email: 'support@gymflow.app',
+          name: 'GYMatrix Support',
+          email: 'support@gymatrix.app',
         },
       },
       servers: [

@@ -1,7 +1,7 @@
 {
-  "name": "@gymflow/backend",
+  "name": "@gymatrix/backend",
   "version": "1.0.0",
-  "description": "GymFlow SaaS — Production-grade Fastify REST API",
+  "description": "GYMatrix SaaS — Production-grade Fastify REST API",
   "main": "dist/server.js",
   "type": "commonjs",
   "scripts": {
@@ -29,7 +29,7 @@
     "fastify",
     "api"
   ],
-  "author": "GymFlow",
+  "author": "GYMatrix",
   "license": "MIT",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1115.0",

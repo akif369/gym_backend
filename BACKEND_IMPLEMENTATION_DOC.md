@@ -1,4 +1,4 @@
-# GymFlow Backend Implementation Doc
+# GYMatrix Backend Implementation Doc
 
 Date audited: August 8, 2026
 

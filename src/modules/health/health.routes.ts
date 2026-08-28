@@ -22,7 +22,7 @@ export async function healthRoutes(fastify: FastifyInstance): Promise<void> {
     },
     async (_request, reply) => {
       return reply.send({
-        message: 'Welcome to GymFlow',
+        message: 'Welcome to GYMatrix',
       });
     },
   );

@@ -1,5 +1,5 @@
 /**
- * Global Fastify type augmentations for GymFlow
+ * Global Fastify type augmentations for GYMatrix
  */
 
 import 'fastify';

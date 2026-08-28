@@ -13,7 +13,7 @@ import { pinsConflict, resolveBiometricPin } from './biometric-pin';
 
 const log = createLogger('biometrics-service');
 
-// ZKTeco F09 access groups used by GymFlow.
+// ZKTeco F09 access groups used by GYMatrix.
 export const BIOMETRIC_ACCESS_GROUP_ALLOWED = 1;
 export const BIOMETRIC_ACCESS_GROUP_DENIED = 99;
 
