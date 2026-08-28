@@ -10,6 +10,7 @@ import {
   createOrganization,
   getGlobalAuditLogs,
   getOrganizationUsers,
+  getOrganizationMembers,
   updateAdminUser,
 } from './admin.service';
 
@@ -67,6 +68,10 @@ export const adminController = {
 
   async getUsers(req: FastifyRequest<{ Params: { orgId: string } }>, reply: FastifyReply) {
     return reply.send({ users: await getOrganizationUsers(req.params.orgId) });
+  },
+
+  async getMembers(req: FastifyRequest<{ Params: { orgId: string } }>, reply: FastifyReply) {
+    return reply.send({ members: await getOrganizationMembers(req.params.orgId) });
   },
 
   async updateUser(req: FastifyRequest<{ Params: { userId: string } }>, reply: FastifyReply) {

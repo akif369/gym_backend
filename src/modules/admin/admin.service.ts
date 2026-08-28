@@ -268,6 +268,25 @@ export async function getOrganizationUsers(orgId: string) {
     .orderBy(sql`${users.createdAt} ASC`);
 }
 
+export async function getOrganizationMembers(orgId: string) {
+  return await db
+    .select({
+      id: members.id,
+      memberNumber: members.memberNumber,
+      firstName: members.firstName,
+      lastName: members.lastName,
+      email: members.email,
+      phone: members.phone,
+      status: members.status,
+      branchId: members.branchId,
+      joinDate: members.joinDate,
+      createdAt: members.createdAt,
+    })
+    .from(members)
+    .where(eq(members.organizationId, orgId))
+    .orderBy(sql`${members.createdAt} DESC`);
+}
+
 export async function updateAdminUser(userId: string, payload: { firstName?: string; lastName?: string; role?: any; status?: 'ACTIVE' | 'INACTIVE'; branchId?: string | null }) {
   const [user] = await db
     .update(users)

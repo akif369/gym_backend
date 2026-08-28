@@ -67,6 +67,12 @@ export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
     adminController.getUsers as any
   );
 
+  fastify.get(
+    '/organizations/:orgId/members',
+    { preHandler: adminAuth, schema: { tags: ['Admin'], summary: 'List members for an organization' } },
+    adminController.getMembers as any
+  );
+
   fastify.patch(
     '/users/:userId',
     { preHandler: adminAuth, schema: { tags: ['Admin'], summary: 'Update a user' } },
