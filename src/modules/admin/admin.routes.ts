@@ -63,13 +63,25 @@ export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
 
   fastify.get(
     '/organizations/:orgId/users',
-    { preHandler: adminAuth, schema: { tags: ['Admin'], summary: 'List platform users for an organization' } },
+    {
+      preHandler: adminAuth,
+      schema: {
+        tags: ['Admin'],
+        summary: 'List platform users for an organization'
+      },
+    },
     adminController.getUsers as any
   );
 
   fastify.get(
     '/organizations/:orgId/members',
-    { preHandler: adminAuth, schema: { tags: ['Admin'], summary: 'List members for an organization' } },
+    {
+      preHandler: adminAuth,
+      schema: {
+        tags: ['Admin'],
+        summary: 'List members for an organization'
+      },
+    },
     adminController.getMembers as any
   );
 
@@ -83,6 +95,24 @@ export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
     '/users/:userId',
     { preHandler: adminAuth, schema: { tags: ['Admin'], summary: 'Permanently delete a user' } },
     adminController.deleteUser as any
+  );
+
+  fastify.delete(
+    '/members/:memberId',
+    { preHandler: adminAuth, schema: { tags: ['Admin'], summary: 'Permanently delete a member' } },
+    adminController.deleteMember as any
+  );
+
+  fastify.delete(
+    '/branches/:branchId',
+    { preHandler: adminAuth, schema: { tags: ['Admin'], summary: 'Permanently delete a branch' } },
+    adminController.deleteBranch as any
+  );
+
+  fastify.delete(
+    '/organizations/:orgId',
+    { preHandler: adminAuth, schema: { tags: ['Admin'], summary: 'Permanently delete an organization' } },
+    adminController.deleteOrganization as any
   );
 
   fastify.get(

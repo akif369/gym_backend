@@ -250,9 +250,17 @@ export async function getGlobalAuditLogs() {
     .limit(100);
 }
 
-export async function getOrganizationUsers(orgId: string) {
-  // Return all staff users (filtering out MEMBER role)
-  return await db
+export async function getOrganizationUsers(orgId: string, page = 1, limit = 10) {
+  const offset = (page - 1) * limit;
+
+  const [countResult] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(users)
+    .where(sql`${users.organizationId} = ${orgId} AND ${users.role} != 'MEMBER'`);
+
+  const total = Number(countResult?.count || 0);
+
+  const data = await db
     .select({
       id: users.id,
       email: users.email,
@@ -266,11 +274,24 @@ export async function getOrganizationUsers(orgId: string) {
     })
     .from(users)
     .where(sql`${users.organizationId} = ${orgId} AND ${users.role} != 'MEMBER'`)
-    .orderBy(sql`${users.createdAt} ASC`);
+    .orderBy(sql`${users.createdAt} ASC`)
+    .limit(limit)
+    .offset(offset);
+
+  return { users: data, total, page, limit };
 }
 
-export async function getOrganizationMembers(orgId: string) {
-  return await db
+export async function getOrganizationMembers(orgId: string, page = 1, limit = 10) {
+  const offset = (page - 1) * limit;
+
+  const [countResult] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(members)
+    .where(eq(members.organizationId, orgId));
+
+  const total = Number(countResult?.count || 0);
+
+  const data = await db
     .select({
       id: members.id,
       memberNumber: members.memberNumber,
@@ -282,10 +303,15 @@ export async function getOrganizationMembers(orgId: string) {
       branchId: members.branchId,
       joinDate: members.joinDate,
       createdAt: members.createdAt,
+      deletedAt: members.deletedAt,
     })
     .from(members)
     .where(eq(members.organizationId, orgId))
-    .orderBy(sql`${members.createdAt} DESC`);
+    .orderBy(sql`${members.createdAt} DESC`)
+    .limit(limit)
+    .offset(offset);
+
+  return { members: data, total, page, limit };
 }
 
 export async function updateAdminUser(userId: string, payload: { firstName?: string; lastName?: string; role?: any; status?: 'ACTIVE' | 'INACTIVE'; branchId?: string | null }) {
@@ -324,4 +350,43 @@ export async function deleteAdminUser(userId: string) {
   }
 
   return { success: true, id: deletedUser.id };
+}
+
+export async function deleteAdminMember(memberId: string) {
+  const [deletedMember] = await db
+    .delete(members)
+    .where(eq(members.id, memberId))
+    .returning({ id: members.id });
+
+  if (!deletedMember) {
+    throw AppError.notFound(ErrorCode.NOT_FOUND, 'Member not found');
+  }
+
+  return { success: true, id: deletedMember.id };
+}
+
+export async function deleteAdminBranch(branchId: string) {
+  const [deletedBranch] = await db
+    .delete(branches)
+    .where(eq(branches.id, branchId))
+    .returning({ id: branches.id });
+
+  if (!deletedBranch) {
+    throw AppError.notFound(ErrorCode.NOT_FOUND, 'Branch not found');
+  }
+
+  return { success: true, id: deletedBranch.id };
+}
+
+export async function deleteAdminOrganization(orgId: string) {
+  const [deletedOrg] = await db
+    .delete(organizations)
+    .where(eq(organizations.id, orgId))
+    .returning({ id: organizations.id });
+
+  if (!deletedOrg) {
+    throw AppError.notFound(ErrorCode.ORG_NOT_FOUND, 'Organization not found');
+  }
+
+  return { success: true, id: deletedOrg.id };
 }

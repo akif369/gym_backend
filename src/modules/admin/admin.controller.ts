@@ -13,6 +13,9 @@ import {
   getOrganizationMembers,
   updateAdminUser,
   deleteAdminUser,
+  deleteAdminMember,
+  deleteAdminBranch,
+  deleteAdminOrganization,
 } from './admin.service';
 
 export const adminController = {
@@ -67,12 +70,16 @@ export const adminController = {
     return reply.send({ logs: await getGlobalAuditLogs() });
   },
 
-  async getUsers(req: FastifyRequest<{ Params: { orgId: string } }>, reply: FastifyReply) {
-    return reply.send({ users: await getOrganizationUsers(req.params.orgId) });
+  async getUsers(req: FastifyRequest<{ Params: { orgId: string }; Querystring: { page?: number; limit?: number } }>, reply: FastifyReply) {
+    const page = req.query.page || 1;
+    const limit = req.query.limit || 10;
+    return reply.send(await getOrganizationUsers(req.params.orgId, page, limit));
   },
 
-  async getMembers(req: FastifyRequest<{ Params: { orgId: string } }>, reply: FastifyReply) {
-    return reply.send({ members: await getOrganizationMembers(req.params.orgId) });
+  async getMembers(req: FastifyRequest<{ Params: { orgId: string }; Querystring: { page?: number; limit?: number } }>, reply: FastifyReply) {
+    const page = req.query.page || 1;
+    const limit = req.query.limit || 10;
+    return reply.send(await getOrganizationMembers(req.params.orgId, page, limit));
   },
 
   async updateUser(req: FastifyRequest<{ Params: { userId: string } }>, reply: FastifyReply) {
@@ -81,5 +88,17 @@ export const adminController = {
 
   async deleteUser(req: FastifyRequest<{ Params: { userId: string } }>, reply: FastifyReply) {
     return reply.send(await deleteAdminUser(req.params.userId));
+  },
+
+  async deleteMember(req: FastifyRequest<{ Params: { memberId: string } }>, reply: FastifyReply) {
+    return reply.send(await deleteAdminMember(req.params.memberId));
+  },
+
+  async deleteBranch(req: FastifyRequest<{ Params: { branchId: string } }>, reply: FastifyReply) {
+    return reply.send(await deleteAdminBranch(req.params.branchId));
+  },
+
+  async deleteOrganization(req: FastifyRequest<{ Params: { orgId: string } }>, reply: FastifyReply) {
+    return reply.send(await deleteAdminOrganization(req.params.orgId));
   },
 };
