@@ -18,7 +18,7 @@ import * as path from 'path';
 import { config } from '../../config/env';
 import { sendTextMessage } from '../notifications/notifications.service';
 import { isAutoSyncBiometricsEnabled } from '../org/org.service';
-import { syncMemberToBiometricsService, deleteBiometricIdentityService, syncMemberBiometricAccessService } from '../biometrics/biometrics.service';
+import { deleteBiometricIdentityService, syncMemberBiometricAccessService } from '../biometrics/biometrics.service';
 
 const log = createLogger('members-service');
 
@@ -113,24 +113,24 @@ export async function listMembersService(orgId: string, query: Record<string, un
           eq(members.status, 'INACTIVE'),
           sql`(
             SELECT count(*)
-            FROM ${sql.identifier('member_memberships')}
-            WHERE ${sql.identifier('member_memberships')}.${sql.identifier('member_id')} = ${sql.identifier('members')}.${sql.identifier('id')}
+            FROM "member_memberships"
+            WHERE "member_memberships"."member_id" = "members"."id"
           ) = 0`,
           sql`(
-            SELECT ${sql.identifier('member_memberships')}.${sql.identifier('status')}
-            FROM ${sql.identifier('member_memberships')}
-            WHERE ${sql.identifier('member_memberships')}.${sql.identifier('member_id')} = ${sql.identifier('members')}.${sql.identifier('id')}
-            ORDER BY ${sql.identifier('member_memberships')}.${sql.identifier('created_at')} DESC
+            SELECT "member_memberships"."status"::text
+            FROM "member_memberships"
+            WHERE "member_memberships"."member_id" = "members"."id"
+            ORDER BY "member_memberships"."created_at" DESC
             LIMIT 1
           ) = 'CANCELLED'`
         )
       );
     } else {
       conditions.push(sql`(
-        SELECT ${sql.identifier('member_memberships')}.${sql.identifier('status')}
-        FROM ${sql.identifier('member_memberships')}
-        WHERE ${sql.identifier('member_memberships')}.${sql.identifier('member_id')} = ${sql.identifier('members')}.${sql.identifier('id')}
-        ORDER BY ${sql.identifier('member_memberships')}.${sql.identifier('created_at')} DESC
+        SELECT "member_memberships"."status"::text
+        FROM "member_memberships"
+        WHERE "member_memberships"."member_id" = "members"."id"
+        ORDER BY "member_memberships"."created_at" DESC
         LIMIT 1
       ) = ${membershipStatus}`);
     }
@@ -172,31 +172,31 @@ export async function listMembersService(orgId: string, query: Record<string, un
         LIMIT 1
       )`,
       membershipStart: sql<string | null>`(
-        SELECT ${qualifiedColumn('member_memberships', 'start_date')}
-        FROM ${sql.identifier('member_memberships')}
-        WHERE ${qualifiedColumn('member_memberships', 'member_id')} = ${qualifiedColumn('members', 'id')}
-        ORDER BY ${qualifiedColumn('member_memberships', 'created_at')} DESC
+        SELECT "member_memberships"."start_date"
+        FROM "member_memberships"
+        WHERE "member_memberships"."member_id" = "members"."id"
+        ORDER BY "member_memberships"."created_at" DESC
         LIMIT 1
       )`,
       membershipExpiry: sql<string | null>`(
-        SELECT ${qualifiedColumn('member_memberships', 'end_date')}
-        FROM ${sql.identifier('member_memberships')}
-        WHERE ${qualifiedColumn('member_memberships', 'member_id')} = ${qualifiedColumn('members', 'id')}
-        ORDER BY ${qualifiedColumn('member_memberships', 'created_at')} DESC
+        SELECT "member_memberships"."end_date"
+        FROM "member_memberships"
+        WHERE "member_memberships"."member_id" = "members"."id"
+        ORDER BY "member_memberships"."created_at" DESC
         LIMIT 1
       )`,
-      membershipStatus: sql<string | null>`(
-        SELECT ${qualifiedColumn('member_memberships', 'status')}
-        FROM ${sql.identifier('member_memberships')}
-        WHERE ${qualifiedColumn('member_memberships', 'member_id')} = ${qualifiedColumn('members', 'id')}
-        ORDER BY ${qualifiedColumn('member_memberships', 'created_at')} DESC
+      membershipStatus: sql<string | null>`COALESCE((
+        SELECT "member_memberships"."status"::text
+        FROM "member_memberships"
+        WHERE "member_memberships"."member_id" = "members"."id"
+        ORDER BY "member_memberships"."created_at" DESC
         LIMIT 1
-      )`,
+      ), 'INACTIVE')`,
       lastVisit: sql<Date | null>`(
-        SELECT ${qualifiedColumn('attendance_logs', 'check_in_at')}
-        FROM ${sql.identifier('attendance_logs')}
-        WHERE ${qualifiedColumn('attendance_logs', 'member_id')} = ${qualifiedColumn('members', 'id')}
-        ORDER BY ${qualifiedColumn('attendance_logs', 'check_in_at')} DESC
+        SELECT "attendance_logs"."check_in_at"
+        FROM "attendance_logs"
+        WHERE "attendance_logs"."member_id" = "members"."id"
+        ORDER BY "attendance_logs"."check_in_at" DESC
         LIMIT 1
       )`,
       trainerName: sql<string | null>`(
@@ -322,31 +322,46 @@ export async function createMemberService(
   }
 
   let syncError: string | undefined;
+  let syncAttempted = false;
+  let syncSucceeded = false;
+
   try {
-    const autoSync = data.syncToDevice ?? await isAutoSyncBiometricsEnabled(orgId);
-    if (autoSync && member.branchId) {
-      const pin = data.pin || member.memberNumber.replace(/\D/g, '') || member.id.slice(0, 8);
+    const autoSyncEnabled = await isAutoSyncBiometricsEnabled(orgId);
+
+    // New members are mapped onto biometric devices unless the Add Member toggle is off
+    // and org auto-sync is also disabled. Explicit syncToDevice=true always syncs.
+    const shouldSync = data.syncToDevice === true || (data.syncToDevice !== false && autoSyncEnabled);
+
+    if (shouldSync) {
+      syncAttempted = true;
+
       const name = `${member.firstName} ${member.lastName}`.trim().substring(0, 24);
-      
-      try {
-        await syncMemberBiometricAccessService(orgId, member.id, {
-          force: true,
-          explicitPin: pin,
-          explicitName: name,
-          explicitGroup: data.accessGroup ?? 1
-        });
-        log.info({ memberId: member.id }, 'Triggered auto-sync for new member to biometrics');
-      } catch (err: any) {
-        log.error({ err, memberId: member.id }, 'Failed to auto-sync biometrics for new member');
-        syncError = err.message || 'Unknown error occurred during sync';
+      const result = await syncMemberBiometricAccessService(orgId, member.id, {
+        force: true,
+        explicitPin: data.pin,
+        explicitName: name,
+        explicitGroup: data.accessGroup ?? 1,
+      });
+
+      if (result.reason === 'NO_DEVICES') {
+        throw new Error('Member was created but no biometric device is registered. Add a device in Settings → Hardware, then use Manual Device Sync.');
       }
+      if (result.reason === 'NO_PIN') {
+        throw new Error('Member was created but a numeric PIN could not be generated from the gym number. Enter a PIN in Settings and sync again.');
+      }
+      if (!result.count) {
+        throw new Error('Member was created but biometric identity was not queued for the device');
+      }
+
+      syncSucceeded = true;
+      log.info({ memberId: member.id, branchId: member.branchId, pin: result.pin, count: result.count }, 'New member successfully synced to biometric device');
     }
   } catch (err: any) {
-    log.error({ err, memberId: member.id }, 'Failed to check auto-sync biometrics');
-    syncError = err.message || 'Failed to initialize biometric sync';
+    syncError = err?.message || 'Failed to sync member to biometric device';
+    log.error({ err, memberId: member.id, branchId: member.branchId, syncAttempted }, 'Failed to sync new member to biometric device');
   }
 
-  return { ...member, syncError };
+  return { ...member, syncAttempted, syncSucceeded, syncError };
 }
 
 // ── Get Member ────────────────────────────────────────────────────────────────

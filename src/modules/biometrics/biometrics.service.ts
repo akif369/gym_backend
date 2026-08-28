@@ -4,11 +4,12 @@ import { attendanceLogs } from '../../db/schema/attendance.schema';
 import { members } from '../../db/schema/members.schema';
 import { memberMemberships } from '../../db/schema/memberships.schema';
 import { organizations } from '../../db/schema/org.schema';
-import { eq, and, desc, asc, ne, isNull, sql, lt, inArray } from 'drizzle-orm';
+import { eq, and, desc, asc, isNull, sql, lt, inArray } from 'drizzle-orm';
 import { createLogger } from '../../common/logger/index';
 import crypto from 'crypto';
 import { AppError, ErrorCode } from '../../common/errors/AppError';
 import { getMemberAccessStatusService } from '../members/members.service';
+import { pinsConflict, resolveBiometricPin } from './biometric-pin';
 
 const log = createLogger('biometrics-service');
 
@@ -499,30 +500,33 @@ export async function syncMemberBiometricAccessService(
 
   const effectiveBranchId = options?.explicitBranchId || member.branchId;
 
-  // Find devices from the effective branch
+  // Prefer devices on the member's branch; if none are registered there, use every org device
+  // so new members still appear in Member Device Permissions & Identities.
   const branchDevices = effectiveBranchId ? await db.select()
     .from(biometricDevices)
     .where(eq(biometricDevices.branchId, effectiveBranchId)) : [];
 
-  // Find devices where the member already has an identity (to ensure cross-branch identities are kept in sync)
+  const orgDevices = branchDevices.length === 0
+    ? await db.select().from(biometricDevices).where(eq(biometricDevices.organizationId, orgId))
+    : branchDevices;
+
   const existingIdentityRecords = await db.select({ deviceId: biometricIdentities.deviceId })
     .from(biometricIdentities)
     .where(eq(biometricIdentities.memberId, memberId));
-    
+
   const existingDeviceIds = existingIdentityRecords.map(id => id.deviceId);
   const additionalDevices = existingDeviceIds.length > 0 ? await db.select()
     .from(biometricDevices)
     .where(inArray(biometricDevices.id, existingDeviceIds)) : [];
 
-  // Merge and deduplicate devices
-  const deviceMap = new Map<string, typeof branchDevices[0]>();
-  for (const d of branchDevices) deviceMap.set(d.id, d);
+  const deviceMap = new Map<string, typeof orgDevices[0]>();
+  for (const d of orgDevices) deviceMap.set(d.id, d);
   for (const d of additionalDevices) deviceMap.set(d.id, d);
   const devices = Array.from(deviceMap.values());
 
   if (devices.length === 0) {
     log.debug({ memberId }, 'No biometric devices found for member to sync');
-    return { success: true, count: 0, reason: 'NO_DEVICES' };
+    return { success: true, count: 0, reason: 'NO_DEVICES' as const };
   }
 
   const calculatedGroup = await calculateMemberAccessGroup(orgId, memberId);
@@ -530,41 +534,39 @@ export async function syncMemberBiometricAccessService(
     ? options.explicitGroup
     : calculatedGroup;
 
-  const pin = options?.explicitPin || member.memberNumber.replace(/\D/g, '') || member.id.slice(0, 8);
+  const pin = resolveBiometricPin(options?.explicitPin, member.memberNumber);
+  if (!pin) {
+    log.warn({ memberId, memberNumber: member.memberNumber }, 'Could not resolve a numeric biometric PIN');
+    return { success: false, count: 0, reason: 'NO_PIN' as const };
+  }
   const name = options?.explicitName || `${member.firstName} ${member.lastName}`.trim().substring(0, 24);
+  const pinCommandMatch = `(^|[\\t ])PIN=${pin}(\\t|$)`;
 
   let commandsQueued = 0;
 
   for (const device of devices) {
-    // Check for conflict on this device with another member using the same PIN
-    const [conflict] = await db.select().from(biometricIdentities)
-      .where(and(
-        eq(biometricIdentities.deviceId, device.id),
-        eq(biometricIdentities.deviceUserId, pin),
-        ne(biometricIdentities.memberId, memberId)
-      )).limit(1);
+    const deviceIdentities = await db.select().from(biometricIdentities)
+      .where(eq(biometricIdentities.deviceId, device.id));
+
+    const conflict = deviceIdentities.find(identity =>
+      identity.memberId !== memberId && pinsConflict(identity.deviceUserId, pin)
+    );
 
     if (conflict) {
       log.warn({ memberId, pin, deviceName: device.deviceName }, 'PIN conflict detected on device');
       throw AppError.badRequest(ErrorCode.BAD_REQUEST, `PIN ${pin} is already assigned to another member on device ${device.deviceName}.`);
     }
 
-    const [existingIdentity] = await db.select()
-      .from(biometricIdentities)
-      .where(and(
-        eq(biometricIdentities.deviceId, device.id),
-        eq(biometricIdentities.memberId, memberId)
-      ))
-      .limit(1);
+    const existingIdentity = deviceIdentities.find(identity => identity.memberId === memberId);
 
     // Delta check: if already at target group and SYNCED, and no pending command, no change needed
-    if (!options?.force && existingIdentity && existingIdentity.accessGroup === targetGroup && existingIdentity.syncStatus === 'SYNCED' && existingIdentity.deviceUserId === pin) {
+    if (!options?.force && existingIdentity && existingIdentity.accessGroup === targetGroup && existingIdentity.syncStatus === 'SYNCED' && resolveBiometricPin(existingIdentity.deviceUserId) === pin) {
       const [pendingCmd] = await db.select({ id: biometricDeviceCommands.id })
         .from(biometricDeviceCommands)
         .where(and(
           eq(biometricDeviceCommands.deviceId, device.id),
           eq(biometricDeviceCommands.status, 'PENDING'),
-          sql`${biometricDeviceCommands.commandString} LIKE ${`%PIN=${pin}%`}`
+          sql`${biometricDeviceCommands.commandString} ~ ${pinCommandMatch}`
         ))
         .limit(1);
 
@@ -580,7 +582,7 @@ export async function syncMemberBiometricAccessService(
       .where(and(
         eq(biometricDeviceCommands.deviceId, device.id),
         sql`${biometricDeviceCommands.status} IN ('PENDING', 'SENT')`,
-        sql`${biometricDeviceCommands.commandString} LIKE ${`%PIN=${pin}%`}`
+        sql`${biometricDeviceCommands.commandString} ~ ${pinCommandMatch}`
       ));
 
     // F09 ADMS dialect. This is the format used by the working F09 toggle
@@ -616,8 +618,8 @@ export async function syncMemberBiometricAccessService(
     commandsQueued++;
   }
 
-  log.info({ memberId, targetGroup, commandsQueued }, 'Member biometric access synced');
-  return { success: true, targetGroup, count: commandsQueued };
+  log.info({ memberId, targetGroup, commandsQueued, pin }, 'Member biometric access synced');
+  return { success: true, targetGroup, count: commandsQueued, pin };
 }
 
 /**

@@ -14,3 +14,17 @@ staff edit permission
 
 
 admin , owner can delete branch , organsisation imlement on admin-webapp
+
+
+URL: /iclock/getrequest?SN=NYU7262003002
+Query: Empty <[Object: null prototype] {}> { SN: 'NYU7262003002' }
+Headers: {
+  host: '192.168.1.40:5000',
+  'user-agent': 'iClock Proxy/1.09',
+  connection: 'close',
+  accept: '*/*'
+}
+Body: undefined
+Extracted SN: "NYU7262003002"
+Calling processAdmsGetRequest()...
+ current setup work with multile device in diffenent organsisation

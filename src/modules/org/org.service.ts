@@ -240,10 +240,10 @@ export async function isAutoSyncBiometricsEnabled(orgId: string): Promise<boolea
     .limit(1);
 
   const value = setting?.value;
-  return typeof value === 'object'
-    && value !== null
-    && 'autoSync' in value
-    && value.autoSync === true;
+  if (typeof value === 'object' && value !== null && 'autoSync' in value) {
+    return value.autoSync !== false;
+  }
+  return true;
 }
 
 export async function upsertSettingService(
