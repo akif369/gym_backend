@@ -23,6 +23,7 @@ export const paymentStatusEnum = pgEnum('payment_status', [
   'PARTIALLY_PAID',
   'FAILED',
   'REFUNDED',
+  'PARTIALLY_REFUNDED',
   'CANCELLED',
 ]);
 

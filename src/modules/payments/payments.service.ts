@@ -66,14 +66,13 @@ export async function listPaymentsService(orgId: string, query: Record<string, u
   if (query['branchId']) conditions.push(eq(paymentTransactions.branchId, query['branchId'] as string));
   if (query['memberId']) conditions.push(eq(paymentTransactions.memberId, query['memberId'] as string));
   if (query['status']) conditions.push(eq(paymentTransactions.status, query['status'] as any));
-  if (query['startDate'] && query['endDate']) {
-    conditions.push(
-      gte(paymentTransactions.createdAt, new Date(query['startDate'] as string)),
-      lte(paymentTransactions.createdAt, new Date(query['endDate'] as string)),
-    );
-  }
-  if (query['q']) {
-    const term = `%${query['q']}%`;
+  const startDate = query['startDate'] ?? query['dateFrom'];
+  const endDate = query['endDate'] ?? query['dateTo'];
+  if (startDate) conditions.push(gte(paymentTransactions.createdAt, new Date(`${startDate}T00:00:00.000Z`)));
+  if (endDate) conditions.push(lte(paymentTransactions.createdAt, new Date(`${endDate}T23:59:59.999Z`)));
+  const search = query['q'] ?? query['search'];
+  if (search) {
+    const term = `%${search}%`;
     conditions.push(or(
       ilike(paymentTransactions.memberName!, term),
       ilike(paymentTransactions.description!, term),
@@ -119,6 +118,7 @@ export async function recordPaymentService(
     idempotencyKey?: string;
   },
   actorId: string,
+  branchId?: string | null,
 ) {
   // Idempotency check
   if (data.idempotencyKey) {
@@ -155,6 +155,7 @@ export async function recordPaymentService(
     .insert(paymentTransactions)
     .values({
       organizationId: orgId,
+      branchId: branchId ?? undefined,
       memberId: data.memberId,
       memberName,
       amount: String(data.amount),
@@ -211,7 +212,17 @@ export async function refundPaymentService(
     throw AppError.conflict(ErrorCode.PAYMENT_ALREADY_REFUNDED, 'Payment has already been refunded');
   }
 
-  if (data.amount > parseFloat(payment.totalAmount as string)) {
+  if (!Number.isFinite(data.amount) || data.amount <= 0) {
+    throw AppError.badRequest(ErrorCode.BAD_REQUEST, 'Refund amount must be greater than zero');
+  }
+
+  const [refundTotal] = await db
+    .select({ total: sum(refunds.amount) })
+    .from(refunds)
+    .where(and(eq(refunds.paymentId, paymentId), eq(refunds.status, 'PROCESSED')));
+  const alreadyRefunded = Number(refundTotal?.total ?? 0);
+  const refundableAmount = Math.max(0, Number(payment.totalAmount) - alreadyRefunded);
+  if (data.amount > refundableAmount) {
     throw AppError.badRequest(ErrorCode.REFUND_EXCEEDS_PAYMENT, 'Refund amount exceeds payment total');
   }
 
@@ -228,7 +239,7 @@ export async function refundPaymentService(
     .returning();
 
   // Update payment status
-  const newStatus = data.amount >= parseFloat(payment.totalAmount as string) ? 'REFUNDED' : 'PARTIALLY_PAID';
+  const newStatus = data.amount >= refundableAmount ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
   await db.update(paymentTransactions).set({ status: newStatus as any, updatedAt: new Date() }).where(eq(paymentTransactions.id, paymentId));
 
   await auditLog({

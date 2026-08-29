@@ -12,7 +12,7 @@ export const paymentsController = {
   },
   async create(request: FastifyRequest, reply: FastifyReply) {
     const idempotencyKey = request.headers['idempotency-key'] as string | undefined;
-    const payment = await recordPaymentService(request.user.orgId, { ...(request.body as any), idempotencyKey }, request.user.userId);
+    const payment = await recordPaymentService(request.user.orgId, { ...(request.body as any), idempotencyKey }, request.user.userId, request.user.activeBranchId);
     return reply.status(201).send({ payment });
   },
   async getOne(request: FastifyRequest<{ Params: { paymentId: string } }>, reply: FastifyReply) {

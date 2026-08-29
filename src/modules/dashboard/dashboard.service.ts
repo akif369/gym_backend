@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gte, inArray, isNull, lte, sql, sum } from 'drizzle-orm';
+import { and, count, desc, eq, gte, inArray, isNull, lte, or, sql, sum } from 'drizzle-orm';
 import { db } from '../../db/index';
 import { attendanceLogs } from '../../db/schema/attendance.schema';
 import { leads } from '../../db/schema/leads.schema';
@@ -83,7 +83,11 @@ export async function getDashboardService(ctx: TenantContext) {
     db.select({ createdAt: paymentTransactions.createdAt, totalAmount: paymentTransactions.totalAmount }).from(paymentTransactions).where(and(orgFilter(paymentTransactions), eq(paymentTransactions.status, 'PAID'), gte(paymentTransactions.createdAt, revenueSince))),
     db.select({ checkInAt: attendanceLogs.checkInAt }).from(attendanceLogs).where(and(orgFilter(attendanceLogs), gte(attendanceLogs.checkInAt, today), lte(attendanceLogs.checkInAt, tomorrow))),
     db.select({ id: attendanceLogs.id, memberId: attendanceLogs.memberId, memberName: attendanceLogs.memberName, checkInAt: attendanceLogs.checkInAt, checkOutAt: attendanceLogs.checkOutAt, checkInMethod: attendanceLogs.checkInMethod }).from(attendanceLogs).where(orgFilter(attendanceLogs)).orderBy(desc(attendanceLogs.checkInAt)).limit(6),
-    db.select({ id: paymentTransactions.id, memberId: paymentTransactions.memberId, memberName: paymentTransactions.memberName, amount: paymentTransactions.totalAmount, paymentMethod: paymentTransactions.paymentMethod, status: paymentTransactions.status, createdAt: paymentTransactions.createdAt, referenceId: paymentTransactions.referenceId, description: paymentTransactions.description }).from(paymentTransactions).where(orgFilter(paymentTransactions)).orderBy(desc(paymentTransactions.createdAt)).limit(5),
+    db.select({ id: paymentTransactions.id, memberId: paymentTransactions.memberId, memberName: paymentTransactions.memberName, amount: paymentTransactions.totalAmount, paymentMethod: paymentTransactions.paymentMethod, status: paymentTransactions.status, createdAt: paymentTransactions.createdAt, referenceId: paymentTransactions.referenceId, description: paymentTransactions.description }).from(paymentTransactions).where(and(
+      orgFilter(paymentTransactions),
+      // Include historical branch-less payments while new records are branch-scoped.
+      or(isNull(paymentTransactions.branchId), accessibleBranchesWhere(paymentTransactions, ctx)),
+    )).orderBy(desc(paymentTransactions.createdAt), desc(paymentTransactions.id)).limit(5),
   ]);
 
   const currentlyInside = currentlyInsideRes[0]?.currentlyInside ?? 0;
