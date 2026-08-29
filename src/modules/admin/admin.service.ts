@@ -247,8 +247,20 @@ export async function createOrganization(payload: any) {
   });
 }
 
-export async function getGlobalAuditLogs() {
-  return await db
+export async function getGlobalAuditLogs(page = 1, limit = 25, filters: { search?: string; action?: string; entityType?: string; organizationId?: string; branchId?: string; from?: string; to?: string } = {}) {
+  const offset = (page - 1) * limit;
+  const conditions = [sql`1 = 1`];
+  const search = filters.search?.trim();
+  if (search) conditions.push(sql`(${staffAuditLogs.actorEmail} ILIKE ${`%${search}%`} OR ${staffAuditLogs.description} ILIKE ${`%${search}%`} OR ${organizations.name} ILIKE ${`%${search}%`})`);
+  if (filters.action?.trim()) conditions.push(sql`${staffAuditLogs.action} = ${filters.action.trim()}`);
+  if (filters.entityType?.trim()) conditions.push(sql`${staffAuditLogs.entityType} = ${filters.entityType.trim()}`);
+  if (filters.organizationId?.trim()) conditions.push(sql`${staffAuditLogs.organizationId} = ${filters.organizationId.trim()}`);
+  if (filters.branchId?.trim()) conditions.push(sql`${staffAuditLogs.actorId} IN (SELECT u.id FROM ${users} u WHERE u.branch_id = ${filters.branchId.trim()})`);
+  if (filters.from) conditions.push(sql`${staffAuditLogs.createdAt} >= ${filters.from}`);
+  if (filters.to) conditions.push(sql`${staffAuditLogs.createdAt} < ${filters.to}`);
+  const where = sql.join(conditions, sql` AND `);
+  const [countResult] = await db.select({ count: sql<number>`count(*)` }).from(staffAuditLogs).leftJoin(organizations, eq(staffAuditLogs.organizationId, organizations.id)).where(where);
+  const logs = await db
     .select({
       id: staffAuditLogs.id,
       organizationId: staffAuditLogs.organizationId,
@@ -262,8 +274,11 @@ export async function getGlobalAuditLogs() {
     })
     .from(staffAuditLogs)
     .leftJoin(organizations, eq(staffAuditLogs.organizationId, organizations.id))
+    .where(where)
     .orderBy(sql`${staffAuditLogs.createdAt} DESC`)
-    .limit(100);
+    .limit(limit)
+    .offset(offset);
+  return { logs, total: Number(countResult?.count || 0), page, limit };
 }
 
 export async function getOrganizationUsers(orgId: string, page = 1, limit = 10, filters: { search?: string; status?: string; role?: string } = {}) {

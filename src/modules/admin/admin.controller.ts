@@ -68,7 +68,10 @@ export const adminController = {
   },
 
   async getAuditLogs(req: FastifyRequest, reply: FastifyReply) {
-    return reply.send({ logs: await getGlobalAuditLogs() });
+    const query = req.query as { page?: string; limit?: string; search?: string; action?: string; entityType?: string; organizationId?: string; branchId?: string; from?: string; to?: string };
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(100, Math.max(10, Number(query.limit) || 25));
+    return reply.send(await getGlobalAuditLogs(page, limit, query));
   },
 
   async getUsers(req: FastifyRequest<{ Params: { orgId: string }; Querystring: { page?: number; limit?: number; search?: string; status?: string; role?: string } }>, reply: FastifyReply) {
