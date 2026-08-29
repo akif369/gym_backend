@@ -91,6 +91,12 @@ export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
     adminController.updateUser as any
   );
 
+  fastify.post(
+    '/users/:userId/reset-password',
+    { preHandler: adminAuth, schema: { tags: ['Admin'], summary: 'Set a new password for a user' } },
+    adminController.resetUserPassword as any
+  );
+
   fastify.delete(
     '/users/:userId',
     { preHandler: adminAuth, schema: { tags: ['Admin'], summary: 'Permanently delete a user' } },

@@ -16,6 +16,7 @@ import {
   deleteAdminMember,
   deleteAdminBranch,
   deleteAdminOrganization,
+  resetAdminUserPassword,
 } from './admin.service';
 
 export const adminController = {
@@ -70,20 +71,28 @@ export const adminController = {
     return reply.send({ logs: await getGlobalAuditLogs() });
   },
 
-  async getUsers(req: FastifyRequest<{ Params: { orgId: string }; Querystring: { page?: number; limit?: number } }>, reply: FastifyReply) {
-    const page = req.query.page || 1;
-    const limit = req.query.limit || 10;
-    return reply.send(await getOrganizationUsers(req.params.orgId, page, limit));
+  async getUsers(req: FastifyRequest<{ Params: { orgId: string }; Querystring: { page?: number; limit?: number; search?: string; status?: string; role?: string } }>, reply: FastifyReply) {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 10));
+    return reply.send(await getOrganizationUsers(req.params.orgId, page, limit, req.query));
   },
 
-  async getMembers(req: FastifyRequest<{ Params: { orgId: string }; Querystring: { page?: number; limit?: number } }>, reply: FastifyReply) {
-    const page = req.query.page || 1;
-    const limit = req.query.limit || 10;
-    return reply.send(await getOrganizationMembers(req.params.orgId, page, limit));
+  async getMembers(req: FastifyRequest<{ Params: { orgId: string }; Querystring: { page?: number; limit?: number; search?: string; status?: string } }>, reply: FastifyReply) {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 10));
+    return reply.send(await getOrganizationMembers(req.params.orgId, page, limit, req.query));
   },
 
   async updateUser(req: FastifyRequest<{ Params: { userId: string } }>, reply: FastifyReply) {
     return reply.send({ user: await updateAdminUser(req.params.userId, req.body as any) });
+  },
+
+  async resetUserPassword(req: FastifyRequest<{ Params: { userId: string }; Body: { newPassword?: string } }>, reply: FastifyReply) {
+    const newPassword = req.body?.newPassword?.trim();
+    if (!newPassword || newPassword.length < 8) {
+      return reply.status(400).send({ error: { message: 'Password must be at least 8 characters' } });
+    }
+    return reply.send(await resetAdminUserPassword(req.params.userId, newPassword));
   },
 
   async deleteUser(req: FastifyRequest<{ Params: { userId: string } }>, reply: FastifyReply) {

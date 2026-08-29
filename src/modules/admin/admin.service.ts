@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { config } from '../../config/env';
 import { db } from '../../db/index';
 import { AppError, ErrorCode } from '../../common/errors/AppError';
-import { organizations, users, branches, roles, settings, members, paymentTransactions, staffAuditLogs, platformAdmins } from '../../db/schema/index';
+import { organizations, users, userSessions, branches, roles, settings, members, paymentTransactions, staffAuditLogs, platformAdmins } from '../../db/schema/index';
 import type { FastifyInstance } from 'fastify';
 
 export async function superAdminLogin(fastify: FastifyInstance, payload: any) {
@@ -91,7 +91,7 @@ export async function getAdminStats() {
 }
 
 export async function listOrganizations() {
-  return db
+  const rows = await db
     .select({
       id: organizations.id,
       name: organizations.name,
@@ -101,9 +101,25 @@ export async function listOrganizations() {
       status: organizations.status,
       organizationMode: organizations.organizationMode,
       createdAt: organizations.createdAt,
+      branchCount: sql<number>`(SELECT COUNT(*) FROM ${branches} b WHERE b.organization_id = ${organizations.id})`,
+      activeBranchCount: sql<number>`(SELECT COUNT(*) FROM ${branches} b WHERE b.organization_id = ${organizations.id} AND b.status = 'ACTIVE')`,
+      staffCount: sql<number>`(SELECT COUNT(*) FROM ${users} u WHERE u.organization_id = ${organizations.id} AND u.role <> 'MEMBER' AND u.deleted_at IS NULL)`,
+      activeStaffCount: sql<number>`(SELECT COUNT(*) FROM ${users} u WHERE u.organization_id = ${organizations.id} AND u.role <> 'MEMBER' AND u.status = 'ACTIVE' AND u.deleted_at IS NULL)`,
+      memberCount: sql<number>`(SELECT COUNT(*) FROM ${members} m WHERE m.organization_id = ${organizations.id} AND m.deleted_at IS NULL)`,
+      activeMemberCount: sql<number>`(SELECT COUNT(*) FROM ${members} m WHERE m.organization_id = ${organizations.id} AND m.status = 'ACTIVE' AND m.deleted_at IS NULL)`,
     })
     .from(organizations)
     .orderBy(sql`${organizations.createdAt} DESC`);
+
+  return rows.map(row => ({
+    ...row,
+    branchCount: Number(row.branchCount) || 0,
+    activeBranchCount: Number(row.activeBranchCount) || 0,
+    staffCount: Number(row.staffCount) || 0,
+    activeStaffCount: Number(row.activeStaffCount) || 0,
+    memberCount: Number(row.memberCount) || 0,
+    activeMemberCount: Number(row.activeMemberCount) || 0,
+  }));
 }
 
 export async function updateOrganizationStatus(orgId: string, status: 'ACTIVE' | 'SUSPENDED') {
@@ -250,13 +266,19 @@ export async function getGlobalAuditLogs() {
     .limit(100);
 }
 
-export async function getOrganizationUsers(orgId: string, page = 1, limit = 10) {
+export async function getOrganizationUsers(orgId: string, page = 1, limit = 10, filters: { search?: string; status?: string; role?: string } = {}) {
   const offset = (page - 1) * limit;
+  const search = filters.search?.trim();
+  const conditions = [sql`${users.organizationId} = ${orgId}`, sql`${users.role} != 'MEMBER'`];
+  if (search) conditions.push(sql`(${users.firstName} ILIKE ${`%${search}%`} OR ${users.lastName} ILIKE ${`%${search}%`} OR ${users.email} ILIKE ${`%${search}%`})`);
+  if (filters.status && ['ACTIVE', 'INACTIVE'].includes(filters.status)) conditions.push(sql`${users.status} = ${filters.status}`);
+  if (filters.role && ['OWNER', 'ADMIN', 'STAFF', 'TRAINER', 'RECEPTIONIST'].includes(filters.role)) conditions.push(sql`${users.role} = ${filters.role}`);
+  const where = sql.join(conditions, sql` AND `);
 
   const [countResult] = await db
     .select({ count: sql<number>`count(*)` })
     .from(users)
-    .where(sql`${users.organizationId} = ${orgId} AND ${users.role} != 'MEMBER'`);
+    .where(where);
 
   const total = Number(countResult?.count || 0);
 
@@ -273,7 +295,7 @@ export async function getOrganizationUsers(orgId: string, page = 1, limit = 10) 
       deletedAt: users.deletedAt,
     })
     .from(users)
-    .where(sql`${users.organizationId} = ${orgId} AND ${users.role} != 'MEMBER'`)
+    .where(where)
     .orderBy(sql`${users.createdAt} ASC`)
     .limit(limit)
     .offset(offset);
@@ -281,13 +303,18 @@ export async function getOrganizationUsers(orgId: string, page = 1, limit = 10) 
   return { users: data, total, page, limit };
 }
 
-export async function getOrganizationMembers(orgId: string, page = 1, limit = 10) {
+export async function getOrganizationMembers(orgId: string, page = 1, limit = 10, filters: { search?: string; status?: string } = {}) {
   const offset = (page - 1) * limit;
+  const search = filters.search?.trim();
+  const conditions = [sql`${members.organizationId} = ${orgId}`];
+  if (search) conditions.push(sql`(${members.firstName} ILIKE ${`%${search}%`} OR ${members.lastName} ILIKE ${`%${search}%`} OR ${members.memberNumber} ILIKE ${`%${search}%`} OR ${members.email} ILIKE ${`%${search}%`} OR ${members.phone} ILIKE ${`%${search}%`})`);
+  if (filters.status && ['ACTIVE', 'INACTIVE', 'FROZEN', 'EXPIRED', 'ARCHIVED'].includes(filters.status)) conditions.push(sql`${members.status} = ${filters.status}`);
+  const where = sql.join(conditions, sql` AND `);
 
   const [countResult] = await db
     .select({ count: sql<number>`count(*)` })
     .from(members)
-    .where(eq(members.organizationId, orgId));
+    .where(where);
 
   const total = Number(countResult?.count || 0);
 
@@ -306,7 +333,7 @@ export async function getOrganizationMembers(orgId: string, page = 1, limit = 10
       deletedAt: members.deletedAt,
     })
     .from(members)
-    .where(eq(members.organizationId, orgId))
+    .where(where)
     .orderBy(sql`${members.createdAt} DESC`)
     .limit(limit)
     .offset(offset);
@@ -336,6 +363,23 @@ export async function updateAdminUser(userId: string, payload: { firstName?: str
     status: user.status,
     branchId: user.branchId,
   };
+}
+
+export async function resetAdminUserPassword(userId: string, newPassword: string) {
+  const passwordHash = await argon2.hash(newPassword);
+  const [user] = await db
+    .update(users)
+    .set({ passwordHash, failedLoginCount: 0, lockedUntil: null, updatedAt: new Date() })
+    .where(sql`${users.id} = ${userId} AND ${users.deletedAt} IS NULL`)
+    .returning({ id: users.id });
+
+  if (!user) throw AppError.notFound(ErrorCode.STAFF_NOT_FOUND, 'User not found');
+
+  await db.update(userSessions)
+    .set({ revokedAt: new Date() })
+    .where(sql`${userSessions.userId} = ${userId} AND ${userSessions.revokedAt} IS NULL`);
+
+  return { success: true, id: user.id };
 }
 
 export async function deleteAdminUser(userId: string) {
