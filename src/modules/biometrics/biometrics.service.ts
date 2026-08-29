@@ -3,7 +3,7 @@ import { biometricDevices, biometricEvents, biometricIdentities, biometricDevice
 import { attendanceLogs } from '../../db/schema/attendance.schema';
 import { members } from '../../db/schema/members.schema';
 import { memberMemberships } from '../../db/schema/memberships.schema';
-import { organizations } from '../../db/schema/org.schema';
+import { organizations, branches } from '../../db/schema/org.schema';
 import { eq, and, desc, asc, isNull, sql, lt, inArray, lte } from 'drizzle-orm';
 import { createLogger } from '../../common/logger/index';
 import crypto from 'crypto';
@@ -33,7 +33,7 @@ export function currentDateInTimeZone(timeZone: string) {
  * access window. Group 99 is the physical-device representation of denial.
  * Group 99: All other statuses (EXPIRED, FROZEN, INACTIVE, ARCHIVED, CANCELLED) or no active membership.
  */
-import { TenantContext, tenantWhere, accessibleBranchesWhere } from '../../common/auth/tenant';
+import { TenantContext, tenantWhere, accessibleBranchesWhere, assertBranchAccess } from '../../common/auth/tenant';
 
 export async function calculateMemberAccessGroup(ctx: TenantContext, memberId: string, tx: any = db): Promise<number> {
   const status = await getMemberAccessStatusService(ctx, memberId, tx);
@@ -631,12 +631,40 @@ export async function listIdentitiesService(ctx: TenantContext) {
 }
 
 export async function registerDeviceService(ctx: TenantContext, data: { branchId: string; serialNumber: string; deviceName: string; deviceType?: string; purpose?: any }) {
+  const branchId = data.branchId?.trim();
+  const serialNumber = data.serialNumber?.trim();
+  const deviceName = data.deviceName?.trim();
+
+  if (!branchId || !serialNumber || !deviceName) {
+    throw AppError.badRequest(ErrorCode.BAD_REQUEST, 'Branch, serial number, and device name are required');
+  }
+
+  if (ctx.role !== 'SUPER_ADMIN' && ctx.role !== 'SYSTEM') {
+    assertBranchAccess(ctx, branchId);
+  }
+
+  const [branch] = await db.select({ id: branches.id })
+    .from(branches)
+    .where(and(eq(branches.id, branchId), eq(branches.organizationId, ctx.organizationId)))
+    .limit(1);
+  if (!branch) {
+    throw AppError.notFound(ErrorCode.BRANCH_NOT_FOUND, 'Branch not found');
+  }
+
+  const [existing] = await db.select({ id: biometricDevices.id })
+    .from(biometricDevices)
+    .where(eq(biometricDevices.serialNumber, serialNumber))
+    .limit(1);
+  if (existing) {
+    throw AppError.conflict(ErrorCode.ALREADY_EXISTS, 'A biometric device with this serial number is already registered');
+  }
+
   const [device] = await db.insert(biometricDevices).values({
     organizationId: ctx.organizationId,
-    branchId: data.branchId,
-    serialNumber: data.serialNumber,
-    deviceName: data.deviceName,
-    deviceType: data.deviceType,
+    branchId,
+    serialNumber,
+    deviceName,
+    deviceType: data.deviceType?.trim() || undefined,
     purpose: data.purpose || 'OTHER',
   }).returning();
   return device;
