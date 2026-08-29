@@ -166,6 +166,12 @@ export async function listMembersService(ctx: TenantContext, query: Record<strin
       experienceLevel: members.experienceLevel,
       branchId: members.branchId,
       createdAt: members.createdAt,
+      membershipTimezone: sql<string>`(
+        SELECT ${organizations.timezone}
+        FROM ${organizations}
+        WHERE ${organizations.id} = ${members.organizationId}
+        LIMIT 1
+      )`,
       membershipPlan: sql<string | null>`(
         SELECT ${qualifiedColumn('member_memberships', 'plan_name')}
         FROM ${sql.identifier('member_memberships')}
