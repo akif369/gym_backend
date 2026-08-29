@@ -97,8 +97,9 @@ async function runTest() {
     memberId: member!.id,
     planId: plan!.id,
     planName: plan!.name,
-    startDate: '2026-01-01',
-    endDate: '2026-12-31',
+    startAt: new Date('2026-01-01T00:00:00+05:30'),
+    expiresAt: new Date('2027-01-01T00:00:00+05:30'),
+    timezone: 'Asia/Kolkata',
     status: 'ACTIVE',
   }).returning();
 
@@ -134,9 +135,9 @@ async function runTest() {
   console.log(`Test 7: Smart Delta Diff Check (no status change) -> Commands queued: ${deltaSyncResult.count} (Expected: 0)`);
   if (deltaSyncResult.count !== 0) throw new Error('Smart delta diff failed, queued redundant command');
 
-  // 9. Simulate membership expiry sweep -> Update endDate to past and run expireDueMembershipsService
+  // 9. Simulate membership expiry sweep -> move exclusive expiry into the past.
   await db.update(memberMemberships)
-    .set({ endDate: '2026-01-01' })
+    .set({ expiresAt: new Date('2026-01-01T00:00:00+05:30') })
     .where(eq(memberMemberships.id, activeMembership!.id));
 
   console.log('Simulating daily sweep: running expireDueMembershipsService()...');

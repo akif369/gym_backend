@@ -127,6 +127,13 @@
       "when": 1787917386577,
       "tag": "0017_minor_dormammu",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1788000000000,
+      "tag": "0018_exact_membership_expiry_and_device_access_state",
+      "breakpoints": true
     }
   ]
 }

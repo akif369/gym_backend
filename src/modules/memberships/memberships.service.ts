@@ -1,8 +1,7 @@
-import { addDays, parseISO } from 'date-fns';
 import { db } from '../../db/index';
 import { membershipPlans, memberMemberships, membershipEvents } from '../../db/schema/memberships.schema';
 import { members } from '../../db/schema/members.schema';
-import { eq, and, isNull, desc, asc, count, sql, lt, ne, inArray } from 'drizzle-orm';
+import { eq, and, isNull, desc, asc, count, sql, lt, ne, inArray, lte } from 'drizzle-orm';
 import { AppError, ErrorCode } from '../../common/errors/AppError';
 import { TenantContext, tenantWhere, accessibleBranchesWhere } from '../../common/auth/tenant';
 import { parsePagination, paginationToLimitOffset, buildPaginatedResponse } from '../../common/pagination/paginate';
@@ -14,16 +13,10 @@ import { sendTextMessage, sendMediaMessage } from '../notifications/notification
 import { getInvoiceSettingsService, getTaxSettingsService, getMemberSettingsService } from '../org/org.service';
 import { invoices } from '../../db/schema/payments.schema';
 import { organizations, branches } from '../../db/schema/org.schema';
-import { syncMemberBiometricAccessService } from '../biometrics/biometrics.service';
+import { recordMemberBiometricAccessIntent } from '../biometrics/biometrics.service';
+import { addCalendarDays, dateInTimeZone, formatMembershipDate, localDateFromInput, localMidnightToUtc } from '../../common/utils/membership-time';
 
 const log = createLogger('memberships-service');
-
-function formatDateForMessage(date: string): string {
-  const parsed = new Date(`${date}T00:00:00`);
-  return Number.isNaN(parsed.getTime())
-    ? date
-    : new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(parsed);
-}
 
 function formatAmountForMessage(amount: string): string {
   const numeric = Number(amount);
@@ -32,14 +25,15 @@ function formatAmountForMessage(amount: string): string {
     : `₹${amount}`;
 }
 
-function currentDateInTimeZone(timeZone: string) {
-  try {
-    const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
-    const part = (type: string) => parts.find(item => item.type === type)?.value;
-    return `${part('year')}-${part('month')}-${part('day')}`;
-  } catch {
-    return new Date().toISOString().slice(0, 10);
-  }
+async function getOrganizationTimezone(organizationId: string, tx: any = db): Promise<string> {
+  const [organization] = await tx.select({ timezone: organizations.timezone })
+    .from(organizations)
+    .where(eq(organizations.id, organizationId))
+    .limit(1);
+  if (!organization) throw AppError.notFound(ErrorCode.NOT_FOUND, 'Organization not found');
+  // Validate early so an invalid tenant setting cannot create ambiguous access windows.
+  new Intl.DateTimeFormat('en-US', { timeZone: organization.timezone });
+  return organization.timezone;
 }
 
 async function sendRenewalNotification(
@@ -73,7 +67,7 @@ async function sendRenewalNotification(
 
 Your *${plan.name}* membership has been renewed successfully ✅
 
-📅 Valid until: *${formatDateForMessage(membership.endDate)}*
+📅 Access expires at 12:00 AM on: *${formatMembershipDate(membership.expiresAt, membership.timezone)}*
 💳 Amount: *${formatAmountForMessage(invoice.totalAmount)}*${invoice.taxIncluded ? ' (GST included)' : ''}
 🧾 Invoice: *${invoice.invoiceNumber}*
 
@@ -290,7 +284,8 @@ export async function createMembershipService(
   memberId: string,
   data: {
     planId: string;
-    startDate: string;
+    /** ISO instant or YYYY-MM-DD; normalized to the gym's local midnight. */
+    startAt: string;
     notes?: string;
     idempotencyKey?: string;
   },
@@ -305,8 +300,10 @@ export async function createMembershipService(
     throw AppError.badRequest(ErrorCode.MEMBERSHIP_PLAN_INACTIVE, 'Membership plan is not active');
   }
 
-  const startDate = parseISO(data.startDate);
-  const endDate = addDays(startDate, plan.durationDays);
+  const timezone = await getOrganizationTimezone(ctx.organizationId);
+  const startDate = localDateFromInput(data.startAt, timezone);
+  const startAt = localMidnightToUtc(startDate, timezone);
+  const expiresAt = localMidnightToUtc(addCalendarDays(startDate, plan.durationDays), timezone);
 
   const [membership] = await db
     .insert(memberMemberships)
@@ -316,8 +313,9 @@ export async function createMembershipService(
       memberId,
       planId: plan.id,
       planName: plan.name,
-      startDate: data.startDate,
-      endDate: endDate.toISOString().split('T')[0],
+      startAt,
+      expiresAt,
+      timezone,
       status: 'PENDING',
       ptSessionsTotal: plan.ptSessionsIncluded,
       ...(data.notes ? { notes: data.notes } : {}),
@@ -354,21 +352,17 @@ export async function activateMembershipService(ctx: TenantContext, memberId: st
 
   if (!membership) throw AppError.notFound(ErrorCode.MEMBERSHIP_NOT_FOUND, 'No pending membership found');
 
-  const [updated] = await db
-    .update(memberMemberships)
-    .set({ status: 'ACTIVE', updatedAt: new Date() })
-    .where(eq(memberMemberships.id, membership.id))
-    .returning();
-
-  await db.update(members).set({ status: 'ACTIVE', updatedAt: new Date() }).where(eq(members.id, memberId));
-
-  await emitEvent(ctx, membership.id, memberId, 'ACTIVATED', actorName);
-  await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_ACTIVATED, entityType: 'membership', entityId: membership.id });
-
-  syncMemberBiometricAccessService(ctx, memberId)
-    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership activation'));
-
-  return updated;
+  return db.transaction(async (tx) => {
+    const [updated] = await tx.update(memberMemberships)
+      .set({ status: 'ACTIVE', updatedAt: new Date() })
+      .where(eq(memberMemberships.id, membership.id))
+      .returning();
+    await tx.update(members).set({ status: 'ACTIVE', updatedAt: new Date() }).where(eq(members.id, memberId));
+    await recordMemberBiometricAccessIntent(ctx, memberId, updated!.startAt <= new Date() && updated!.expiresAt > new Date() ? 1 : 99, tx);
+    await emitEvent(ctx, membership.id, memberId, 'ACTIVATED', actorName, undefined, undefined, tx);
+    await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_ACTIVATED, entityType: 'membership', entityId: membership.id }, tx);
+    return updated;
+  });
 }
 
 // ── Renew Membership ──────────────────────────────────────────────────────────
@@ -396,11 +390,13 @@ export async function renewMembershipService(
     if (existing) return existing.membership;
   }
 
-  // Get current active membership
+  // Read the most recent active membership to choose the renewal plan. The
+  // transaction below reads it again before calculating the final boundary.
   const [current] = await db
     .select()
     .from(memberMemberships)
     .where(and(eq(memberMemberships.memberId, memberId), tenantWhere(memberMemberships, ctx), eq(memberMemberships.status, 'ACTIVE')))
+    .orderBy(desc(memberMemberships.expiresAt))
     .limit(1);
 
   const planId = data.planId ?? current?.planId;
@@ -411,23 +407,32 @@ export async function renewMembershipService(
     throw AppError.badRequest(ErrorCode.BAD_REQUEST, 'Invoice amount must be greater than zero');
   }
 
-  // New membership starts from expiry of current (or today)
-  const newStartDate = current?.endDate
-    ? addDays(parseISO(current.endDate), 1)
-    : new Date();
-  const newEndDate = addDays(newStartDate, plan.durationDays);
+  const timezone = await getOrganizationTimezone(ctx.organizationId);
 
   const membership = await db.transaction(async (tx) => {
+    const [lockedCurrent] = await tx.select()
+      .from(memberMemberships)
+      .where(and(eq(memberMemberships.memberId, memberId), tenantWhere(memberMemberships, ctx), eq(memberMemberships.status, 'ACTIVE')))
+      .orderBy(desc(memberMemberships.expiresAt))
+      .limit(1)
+      .for('update');
+    const now = new Date();
+    const startAt = lockedCurrent && lockedCurrent.expiresAt > now
+      ? lockedCurrent.expiresAt
+      : localMidnightToUtc(dateInTimeZone(now, timezone), timezone);
+    const expiresAt = localMidnightToUtc(addCalendarDays(dateInTimeZone(startAt, timezone), plan.durationDays), timezone);
+
     const [newMembership] = await tx
       .insert(memberMemberships)
       .values({
         organizationId: ctx.organizationId,
-        branchId: ctx.activeBranchId,
+        branchId: lockedCurrent?.branchId ?? ctx.activeBranchId,
         memberId,
         planId: plan.id,
         planName: plan.name,
-        startDate: newStartDate.toISOString().split('T')[0],
-        endDate: newEndDate.toISOString().split('T')[0],
+        startAt,
+        expiresAt,
+        timezone,
         status: 'ACTIVE',
         ptSessionsTotal: plan.ptSessionsIncluded,
         ...(data.notes ? { notes: data.notes } : {}),
@@ -436,22 +441,21 @@ export async function renewMembershipService(
       } as any)
       .returning();
 
-    // Mark old as expired
-    if (current) {
-      await tx.update(memberMemberships).set({ status: 'EXPIRED', updatedAt: new Date() }).where(eq(memberMemberships.id, current.id));
+    // Preserve an unexpired old row until its exclusive boundary. This avoids
+    // a renewal creating a gap before the new membership starts.
+    if (lockedCurrent && lockedCurrent.expiresAt <= now) {
+      await tx.update(memberMemberships).set({ status: 'EXPIRED', updatedAt: now }).where(eq(memberMemberships.id, lockedCurrent.id));
     }
 
     // Ensure member is active
     await tx.update(members).set({ status: 'ACTIVE', updatedAt: new Date() }).where(eq(members.id, memberId));
+    await recordMemberBiometricAccessIntent(ctx, memberId, 1, tx);
 
     await emitEvent(ctx, newMembership!.id, memberId, 'RENEWED', actorName, data.notes, { plan: { name: plan.name } }, tx);
     await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_RENEWED, entityType: 'membership', entityId: newMembership!.id }, tx);
     
     return newMembership;
   });
-
-  syncMemberBiometricAccessService(ctx, memberId)
-    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership renewal'));
 
   sendRenewalNotification(ctx, memberId, membership!, plan, data.invoiceAmount)
     .catch((error) => {
@@ -470,40 +474,52 @@ export async function expireDueMembershipsService() {
     const candidates = await tx.select({
       membership: memberMemberships,
       organizationId: members.organizationId,
-      timezone: organizations.timezone,
       firstName: members.firstName,
       lastName: members.lastName,
       phone: members.phone,
     })
       .from(memberMemberships)
       .innerJoin(members, eq(members.id, memberMemberships.memberId))
-      .innerJoin(organizations, eq(organizations.id, members.organizationId))
       .where(and(
         eq(memberMemberships.status, 'ACTIVE'),
         isNull(members.deletedAt),
-      ));
+        sql`${memberMemberships.expiresAt} <= NOW()`,
+      ))
+      .orderBy(asc(memberMemberships.expiresAt))
+      .limit(500)
+      .for('update', { skipLocked: true });
 
     const newlyExpired = [];
     for (const candidate of candidates) {
-      const today = currentDateInTimeZone(candidate.timezone);
-      if (candidate.membership.endDate >= today) continue;
-      
       const [updated] = await tx.update(memberMemberships)
         .set({ status: 'EXPIRED', updatedAt: new Date() })
         .where(and(
           eq(memberMemberships.id, candidate.membership.id),
           eq(memberMemberships.status, 'ACTIVE'),
-          lt(memberMemberships.endDate, today),
+          sql`${memberMemberships.expiresAt} <= NOW()`,
         ))
         .returning();
       if (!updated) continue;
+
+      // A pre-renewal may already have created the next membership starting at
+      // this exact boundary. Do not briefly deny the member in that case.
+      const [stillEligible] = await tx.select({ id: memberMemberships.id })
+        .from(memberMemberships)
+        .where(and(
+          eq(memberMemberships.memberId, updated.memberId),
+          eq(memberMemberships.status, 'ACTIVE'),
+          sql`${memberMemberships.startAt} <= NOW()`,
+          sql`${memberMemberships.expiresAt} > NOW()`,
+        ))
+        .limit(1);
+      await recordMemberBiometricAccessIntent({ organizationId: candidate.organizationId } as TenantContext, updated.memberId, stillEligible ? 1 : 99, tx);
 
       await auditLog({
         organizationId: candidate.organizationId,
         action: AuditAction.MEMBERSHIP_EXPIRED,
         entityType: 'membership',
         entityId: updated.id,
-        description: `Membership expired on ${updated.endDate}`,
+        description: `Membership expired at ${updated.expiresAt.toISOString()}`,
       }, tx);
       
       newlyExpired.push({ candidate, updated });
@@ -516,9 +532,6 @@ export async function expireDueMembershipsService() {
   let notified = 0;
 
   for (const { candidate, updated } of expiredMemberships) {
-    syncMemberBiometricAccessService({ organizationId: candidate.organizationId } as any, updated.memberId)
-      .catch(err => log.error({ err, memberId: updated.memberId }, 'Failed to sync biometric access on membership expiry sweep'));
-
     if (!candidate.phone) continue;
     try {
       const memberName = `${candidate.firstName} ${candidate.lastName}`.trim();
@@ -527,7 +540,7 @@ export async function expireDueMembershipsService() {
         memberId: updated.memberId,
         eventType: 'MEMBERSHIP_EXPIRED',
         phone: candidate.phone,
-        text: `Hello ${memberName} 👋\n\nYour *${updated.planName}* membership expired on *${formatDateForMessage(updated.endDate)}*.\n\nRenew now to continue uninterrupted access to the gym and your training plan. Please contact us and we’ll be happy to help. 💪`,
+        text: `Hello ${memberName} 👋\n\nYour *${updated.planName}* membership expired at 12:00 AM on *${formatMembershipDate(updated.expiresAt, updated.timezone)}*.\n\nRenew now to continue uninterrupted access to the gym and your training plan. Please contact us and we’ll be happy to help. 💪`,
         idempotencyKey: `membership-expired:${updated.id}`,
       });
       if (delivery.status === 'SENT') notified += 1;
@@ -560,11 +573,8 @@ export async function sweepInactiveMembersService() {
       const settings = await getMemberSettingsService(target.orgId, target.branchId);
       const daysBeforeInactive = settings.daysBeforeInactive;
       
-      // Timezone safe cutoff date logic
-      const orgTodayStr = currentDateInTimeZone(target.timezone);
-      const cutoffDate = new Date(`${orgTodayStr}T00:00:00`);
-      cutoffDate.setDate(cutoffDate.getDate() - daysBeforeInactive);
-      const cutoffString = cutoffDate.toISOString().split('T')[0]!;
+      const cutoffString = addCalendarDays(dateInTimeZone(new Date(), target.timezone), -daysBeforeInactive);
+      const cutoffAt = localMidnightToUtc(cutoffString, target.timezone);
 
       // Find members for this target (branch or org fallback) who are not ARCHIVED
       const sweepCandidates = await tx
@@ -582,7 +592,7 @@ export async function sweepInactiveMembersService() {
       // Batch fetch all memberships to eliminate N+1 queries (production grade)
       const candidateIds = sweepCandidates.map(m => m.id);
       const allPlans = await tx
-        .select({ memberId: memberMemberships.memberId, status: memberMemberships.status, endDate: memberMemberships.endDate })
+        .select({ memberId: memberMemberships.memberId, status: memberMemberships.status, expiresAt: memberMemberships.expiresAt })
         .from(memberMemberships)
         .where(inArray(memberMemberships.memberId, candidateIds));
 
@@ -594,15 +604,15 @@ export async function sweepInactiveMembersService() {
       }
 
       for (const member of sweepCandidates) {
-        // Get plans for this member and sort descending by endDate
+        // Get plans for this member and sort descending by their exclusive expiry.
         const memberPlans = plansByMember.get(member.id) || [];
-        memberPlans.sort((a, b) => b.endDate.localeCompare(a.endDate));
+        memberPlans.sort((a, b) => b.expiresAt.getTime() - a.expiresAt.getTime());
 
         const hasActive = memberPlans.some(p => p.status === 'ACTIVE' || p.status === 'FROZEN');
         const latestPlan = memberPlans[0];
         
         let shouldBeInactive = false;
-        if (!hasActive && latestPlan && ['EXPIRED', 'CANCELLED'].includes(latestPlan.status) && latestPlan.endDate < cutoffString) {
+        if (!hasActive && latestPlan && ['EXPIRED', 'CANCELLED'].includes(latestPlan.status) && latestPlan.expiresAt < cutoffAt) {
           shouldBeInactive = true;
         }
 
@@ -621,8 +631,7 @@ export async function sweepInactiveMembersService() {
             description: `Member status updated to INACTIVE due to ${daysBeforeInactive} days of expiry`,
           }, tx);
 
-          syncMemberBiometricAccessService({ organizationId: target.orgId } as any, member.id)
-            .catch(err => log.error({ err, memberId: member.id }, 'Failed to sync biometric access on inactive sweep'));
+          await recordMemberBiometricAccessIntent({ organizationId: target.orgId } as TenantContext, member.id, 99, tx);
         }
       }
     }
@@ -646,12 +655,15 @@ export async function freezeMembershipService(
 
   if (!membership) throw AppError.notFound(ErrorCode.MEMBERSHIP_NOT_ACTIVE, 'No active membership to freeze');
 
-  const freezeDays = Math.ceil(
-    (parseISO(data.freezeEnd).getTime() - parseISO(data.freezeStart).getTime()) / (1000 * 60 * 60 * 24),
-  );
+  const freezeDays = Math.max(0, Math.round(
+    (Date.parse(`${data.freezeEnd}T00:00:00Z`) - Date.parse(`${data.freezeStart}T00:00:00Z`)) / (1000 * 60 * 60 * 24),
+  ));
 
-  // Extend end date by freeze period
-  const newEndDate = addDays(parseISO(membership.endDate), freezeDays);
+  // Preserve calendar-day duration using the membership's original timezone.
+  const newExpiresAt = localMidnightToUtc(
+    addCalendarDays(dateInTimeZone(membership.expiresAt, membership.timezone), freezeDays),
+    membership.timezone,
+  );
 
   const updated = await db.transaction(async (tx) => {
     const [res] = await tx
@@ -661,7 +673,7 @@ export async function freezeMembershipService(
         freezeStartDate: data.freezeStart,
         freezeEndDate: data.freezeEnd,
         frozenDays: membership.frozenDays + freezeDays,
-        endDate: newEndDate.toISOString().split('T')[0],
+        expiresAt: newExpiresAt,
         updatedAt: new Date(),
       })
       .where(eq(memberMemberships.id, membership.id))
@@ -669,12 +681,10 @@ export async function freezeMembershipService(
 
     await emitEvent(ctx, membership.id, memberId, 'FROZEN', actorName, data.reason, { freezeStart: data.freezeStart, freezeEnd: data.freezeEnd, freezeDays }, tx);
     await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_FROZEN, entityType: 'membership', entityId: membership.id }, tx);
+    await recordMemberBiometricAccessIntent(ctx, memberId, 99, tx);
     
     return res;
   });
-
-  syncMemberBiometricAccessService(ctx, memberId)
-    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership freeze'));
 
   return updated;
 }
@@ -699,12 +709,10 @@ export async function resumeMembershipService(ctx: TenantContext, memberId: stri
 
     await emitEvent(ctx, membership.id, memberId, 'RESUMED', actorName, undefined, undefined, tx);
     await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_RESUMED, entityType: 'membership', entityId: membership.id }, tx);
+    await recordMemberBiometricAccessIntent(ctx, memberId, res!.expiresAt > new Date() ? 1 : 99, tx);
     
     return res;
   });
-
-  syncMemberBiometricAccessService(ctx, memberId)
-    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership resume'));
 
   return updated;
 }
@@ -736,12 +744,10 @@ export async function cancelMembershipService(ctx: TenantContext, memberId: stri
 
     await emitEvent(ctx, membership.id, memberId, 'CANCELLED', actorName, reason, undefined, tx);
     await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_CANCELLED, entityType: 'membership', entityId: membership.id, description: reason }, tx);
+    await recordMemberBiometricAccessIntent(ctx, memberId, 99, tx);
     
     return res;
   });
-
-  syncMemberBiometricAccessService(ctx, memberId)
-    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership cancellation'));
 
   return updated;
 }
@@ -757,23 +763,25 @@ export async function extendMembershipService(ctx: TenantContext, memberId: stri
 
   if (!membership) throw AppError.notFound(ErrorCode.MEMBERSHIP_NOT_ACTIVE, 'No active membership to extend');
 
-  const newEndDate = addDays(parseISO(membership.endDate), days);
+  if (!Number.isInteger(days) || days <= 0) throw AppError.badRequest(ErrorCode.BAD_REQUEST, 'Extension days must be a positive integer');
+  const newExpiresAt = localMidnightToUtc(
+    addCalendarDays(dateInTimeZone(membership.expiresAt, membership.timezone), days),
+    membership.timezone,
+  );
 
   const updated = await db.transaction(async (tx) => {
     const [res] = await tx
       .update(memberMemberships)
-      .set({ endDate: newEndDate.toISOString().split('T')[0], updatedAt: new Date() })
+      .set({ expiresAt: newExpiresAt, updatedAt: new Date() })
       .where(eq(memberMemberships.id, membership.id))
       .returning();
 
     await emitEvent(ctx, membership.id, memberId, 'EXTENDED', actorName, reason, { extendedBy: days }, tx);
     await auditLog({ organizationId: ctx.organizationId, actorId: ctx.userId, action: AuditAction.MEMBERSHIP_EXTENDED, entityType: 'membership', entityId: membership.id, description: `Extended by ${days} days` }, tx);
+    await recordMemberBiometricAccessIntent(ctx, memberId, 1, tx);
     
     return res;
   });
-
-  syncMemberBiometricAccessService(ctx, memberId)
-    .catch(err => log.error({ err, memberId }, 'Failed to sync biometric access on membership extension'));
 
   return updated;
 }

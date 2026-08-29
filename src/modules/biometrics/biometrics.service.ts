@@ -1,10 +1,10 @@
 import { db } from '../../db/index';
-import { biometricDevices, biometricEvents, biometricIdentities, biometricDeviceCommands } from '../../db/schema/biometrics.schema';
+import { biometricDevices, biometricEvents, biometricIdentities, biometricDeviceCommands, deviceAccessStates } from '../../db/schema/biometrics.schema';
 import { attendanceLogs } from '../../db/schema/attendance.schema';
 import { members } from '../../db/schema/members.schema';
 import { memberMemberships } from '../../db/schema/memberships.schema';
 import { organizations } from '../../db/schema/org.schema';
-import { eq, and, desc, asc, isNull, sql, lt, inArray } from 'drizzle-orm';
+import { eq, and, desc, asc, isNull, sql, lt, inArray, lte } from 'drizzle-orm';
 import { createLogger } from '../../common/logger/index';
 import crypto from 'crypto';
 import { AppError, ErrorCode } from '../../common/errors/AppError';
@@ -29,7 +29,8 @@ export function currentDateInTimeZone(timeZone: string) {
 
 /**
  * Calculates whether a member should be in Access Group 1 (Active/Allowed) or Group 99 (Denied).
- * Group 1: Member status is ACTIVE AND member has at least one active membership with endDate >= today.
+ * Group 1: Member status is ACTIVE and one membership is inside its exact UTC
+ * access window. Group 99 is the physical-device representation of denial.
  * Group 99: All other statuses (EXPIRED, FROZEN, INACTIVE, ARCHIVED, CANCELLED) or no active membership.
  */
 import { TenantContext, tenantWhere, accessibleBranchesWhere } from '../../common/auth/tenant';
@@ -37,6 +38,146 @@ import { TenantContext, tenantWhere, accessibleBranchesWhere } from '../../commo
 export async function calculateMemberAccessGroup(ctx: TenantContext, memberId: string, tx: any = db): Promise<number> {
   const status = await getMemberAccessStatusService(ctx, memberId, tx);
   return status.allowed ? BIOMETRIC_ACCESS_GROUP_ALLOWED : BIOMETRIC_ACCESS_GROUP_DENIED;
+}
+
+/**
+ * Persist the desired physical access group in the same transaction as a
+ * membership mutation. It never waits for an F09 device or ADMS response.
+ */
+export async function recordMemberBiometricAccessIntent(
+  ctx: TenantContext,
+  memberId: string,
+  desiredGroup: number,
+  tx: any = db,
+) {
+  const [member] = await tx.select({ id: members.id, branchId: members.branchId })
+    .from(members)
+    .where(and(eq(members.id, memberId), tenantWhere(members, ctx)))
+    .limit(1);
+  if (!member) return { statesRecorded: 0 };
+
+  const branchDevices = member.branchId
+    ? await tx.select().from(biometricDevices).where(and(eq(biometricDevices.branchId, member.branchId), tenantWhere(biometricDevices, ctx)))
+    : [];
+  const existingIdentities = await tx.select({ deviceId: biometricIdentities.deviceId })
+    .from(biometricIdentities)
+    .where(eq(biometricIdentities.memberId, memberId));
+  const priorDevices = existingIdentities.length > 0
+    ? await tx.select().from(biometricDevices).where(inArray(biometricDevices.id, existingIdentities.map((identity: any) => identity.deviceId)))
+    : [];
+  const allDevices = branchDevices.length > 0
+    ? [...branchDevices, ...priorDevices]
+    : await tx.select().from(biometricDevices).where(tenantWhere(biometricDevices, ctx));
+  const devices = [...new Map<string, any>(allDevices.map((device: any) => [device.id, device])).values()];
+
+  for (const device of devices) {
+    await tx.insert(deviceAccessStates).values({
+      organizationId: ctx.organizationId,
+      branchId: device.branchId,
+      deviceId: device.id,
+      memberId,
+      desiredGroup,
+      status: 'PENDING',
+      nextAttemptAt: new Date(),
+      lastDesiredAt: new Date(),
+      updatedAt: new Date(),
+    }).onConflictDoUpdate({
+      target: [deviceAccessStates.deviceId, deviceAccessStates.memberId],
+      set: {
+        desiredGroup,
+        desiredVersion: sql`${deviceAccessStates.desiredVersion} + 1`,
+        status: 'PENDING',
+        nextAttemptAt: new Date(),
+        lastError: null,
+        lastDesiredAt: new Date(),
+        updatedAt: new Date(),
+      },
+    });
+  }
+  return { statesRecorded: devices.length };
+}
+
+const retryDelayMs = (attempt: number) => Math.min(15 * 60_000, [10_000, 30_000, 60_000, 120_000, 300_000][Math.min(attempt, 4)] ?? 900_000);
+
+/** Requeue ADMS deliveries that were sent but not acknowledged before timeout. */
+export async function recoverStaleDeviceAccessStates() {
+  const stale = await db.select().from(deviceAccessStates)
+    .where(and(eq(deviceAccessStates.status, 'SENT'), lte(deviceAccessStates.nextAttemptAt, new Date())))
+    .limit(100);
+  for (const state of stale) {
+    await db.transaction(async (tx) => {
+      await tx.update(biometricDeviceCommands)
+        .set({ status: 'FAILED', completedAt: new Date() })
+        .where(and(eq(biometricDeviceCommands.accessStateId, state.id), eq(biometricDeviceCommands.desiredVersion, state.desiredVersion), eq(biometricDeviceCommands.status, 'SENT')));
+      await tx.update(deviceAccessStates)
+        .set({ status: 'PENDING', nextAttemptAt: new Date(Date.now() + retryDelayMs(state.attemptCount)), lastError: 'ADMS acknowledgement timeout', updatedAt: new Date() })
+        .where(and(eq(deviceAccessStates.id, state.id), eq(deviceAccessStates.status, 'SENT'), eq(deviceAccessStates.desiredVersion, state.desiredVersion)));
+    });
+  }
+  return { recovered: stale.length };
+}
+
+/**
+ * Converts durable desired states into at most one ADMS command per device per
+ * run. This prevents an expiry burst from flooding an F09 controller.
+ */
+export async function queuePendingDeviceAccessCommands(limit = 100) {
+  const pending = await db.select({ state: deviceAccessStates, device: biometricDevices, member: members })
+    .from(deviceAccessStates)
+    .innerJoin(biometricDevices, eq(biometricDevices.id, deviceAccessStates.deviceId))
+    .innerJoin(members, eq(members.id, deviceAccessStates.memberId))
+    .where(and(eq(deviceAccessStates.status, 'PENDING'), lte(deviceAccessStates.nextAttemptAt, new Date()), isNull(members.deletedAt)))
+    .orderBy(asc(deviceAccessStates.nextAttemptAt))
+    .limit(limit);
+  const claimedDevices = new Set<string>();
+  let queued = 0;
+
+  for (const { state, device, member } of pending) {
+    if (claimedDevices.has(device.id)) continue;
+    claimedDevices.add(device.id);
+    await db.transaction(async (tx) => {
+      const [fresh] = await tx.select().from(deviceAccessStates).where(eq(deviceAccessStates.id, state.id)).limit(1).for('update');
+      if (!fresh || fresh.status !== 'PENDING' || fresh.desiredVersion !== state.desiredVersion) return;
+      const pin = resolveBiometricPin(undefined, member.memberNumber);
+      if (!pin) {
+        await tx.update(deviceAccessStates).set({ status: 'FAILED', lastError: 'Member has no valid numeric biometric PIN', nextAttemptAt: new Date(Date.now() + 15 * 60_000), updatedAt: new Date() }).where(eq(deviceAccessStates.id, fresh.id));
+        return;
+      }
+      const [identity] = await tx.select().from(biometricIdentities)
+        .where(and(eq(biometricIdentities.deviceId, device.id), eq(biometricIdentities.memberId, member.id)))
+        .limit(1);
+      if (identity) {
+        await tx.update(biometricIdentities).set({ deviceUserId: pin, syncStatus: 'PENDING', updatedAt: new Date() }).where(eq(biometricIdentities.id, identity.id));
+      } else {
+        await tx.insert(biometricIdentities).values({ organizationId: device.organizationId, branchId: device.branchId, memberId: member.id, deviceId: device.id, deviceUserId: pin, accessGroup: BIOMETRIC_ACCESS_GROUP_DENIED, syncStatus: 'PENDING' });
+      }
+      const name = `${member.firstName} ${member.lastName}`.trim().substring(0, 24);
+      await tx.insert(biometricDeviceCommands).values({
+        organizationId: device.organizationId,
+        branchId: device.branchId,
+        deviceId: device.id,
+        deviceSerial: device.serialNumber,
+        accessStateId: fresh.id,
+        desiredVersion: fresh.desiredVersion,
+        commandString: `DATA UPDATE USERINFO PIN=${pin}\tName=${name}\tPrivilege=0\tGrp=${fresh.desiredGroup}`,
+        status: 'PENDING',
+      });
+      await tx.update(deviceAccessStates).set({
+        status: 'SENT',
+        attemptCount: fresh.attemptCount + 1,
+        nextAttemptAt: new Date(Date.now() + 2 * 60_000),
+        updatedAt: new Date(),
+      }).where(and(eq(deviceAccessStates.id, fresh.id), eq(deviceAccessStates.desiredVersion, fresh.desiredVersion)));
+      queued += 1;
+    });
+  }
+  return { queued };
+}
+
+export async function runDeviceAccessSyncWorker() {
+  const recovered = await recoverStaleDeviceAccessStates();
+  const queued = await queuePendingDeviceAccessCommands();
+  return { ...recovered, ...queued };
 }
 
 export async function processAdmsAttendance(
@@ -374,8 +515,16 @@ export async function processAdmsDeviceCmd(deviceSn: string, payload: string) {
         ))
         .returning();
 
+      const [state] = updatedCmd?.accessStateId && updatedCmd.desiredVersion !== null
+        ? await db.select().from(deviceAccessStates).where(eq(deviceAccessStates.id, updatedCmd.accessStateId)).limit(1)
+        : [undefined];
+      // Never let a late command mutate the identity projection after a newer
+      // desired version was committed.
+      const isCurrentDesiredState = !updatedCmd?.accessStateId
+        || (state && state.desiredVersion === updatedCmd.desiredVersion);
+
       // If we can extract the PIN and Group from the commandString, update biometricIdentities
-      if (updatedCmd && updatedCmd.commandString) {
+      if (updatedCmd && isCurrentDesiredState && updatedCmd.commandString) {
         const pinMatch = updatedCmd.commandString.match(/PIN=(\w+)/i);
         const grpMatch = updatedCmd.commandString.match(/Grp=(\d+)/i) || updatedCmd.commandString.match(/Group=(\d+)/i);
         const targetGrp = grpMatch && grpMatch[1] ? parseInt(grpMatch[1], 10) : undefined;
@@ -399,6 +548,30 @@ export async function processAdmsDeviceCmd(deviceSn: string, payload: string) {
             ));
         }
       }
+
+      // Only acknowledge the currently desired version. A late response for an
+      // older Group 99 command must never overwrite a newer Group 1 intent.
+      if (updatedCmd?.accessStateId && updatedCmd.desiredVersion !== null) {
+        if (state && state.desiredVersion === updatedCmd.desiredVersion) {
+          if (isSuccess) {
+            await db.update(deviceAccessStates).set({
+              appliedGroup: state.desiredGroup,
+              appliedVersion: updatedCmd.desiredVersion,
+              status: 'SYNCED',
+              lastError: null,
+              lastAppliedAt: new Date(),
+              updatedAt: new Date(),
+            }).where(and(eq(deviceAccessStates.id, state.id), eq(deviceAccessStates.desiredVersion, updatedCmd.desiredVersion)));
+          } else {
+            await db.update(deviceAccessStates).set({
+              status: 'PENDING',
+              lastError: `ADMS returned ${returnCode ?? 'an unknown error'}`,
+              nextAttemptAt: new Date(Date.now() + retryDelayMs(state.attemptCount)),
+              updatedAt: new Date(),
+            }).where(and(eq(deviceAccessStates.id, state.id), eq(deviceAccessStates.desiredVersion, updatedCmd.desiredVersion)));
+          }
+        }
+      }
     }
   }
 }
@@ -410,9 +583,6 @@ export async function listDevicesService(ctx: TenantContext) {
 }
 
 export async function listIdentitiesService(ctx: TenantContext) {
-  const [org] = await db.select({ timezone: organizations.timezone }).from(organizations).where(eq(organizations.id, ctx.organizationId)).limit(1);
-  const todayStr = currentDateInTimeZone(org?.timezone || 'Asia/Kolkata');
-
   const rows = await db.select({
     id: biometricIdentities.id,
     memberId: biometricIdentities.memberId,
@@ -432,7 +602,8 @@ export async function listIdentitiesService(ctx: TenantContext) {
       SELECT 1 FROM ${memberMemberships}
       WHERE ${memberMemberships.memberId} = ${members.id}
         AND ${memberMemberships.status} = 'ACTIVE'
-        AND ${memberMemberships.endDate} >= ${todayStr}
+        AND ${memberMemberships.startAt} <= NOW()
+        AND ${memberMemberships.expiresAt} > NOW()
     )`.as('has_active_plan'),
   }).from(biometricIdentities)
     .innerJoin(members, eq(members.id, biometricIdentities.memberId))

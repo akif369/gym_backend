@@ -236,20 +236,20 @@ async function seed() {
 
   // ── 10. Memberships ────────────────────────────────────────────────────────
   log.info('Seeding memberships...');
-  const [mem1] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[0]!.id, planId: plan2!.id, planName: 'Monthly Pro', startDate: '2026-07-01', endDate: '2026-07-31', status: 'ACTIVE', ptSessionsTotal: 2, createdBy: admin!.id }).returning();
+  const [mem1] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[0]!.id, planId: plan2!.id, planName: 'Monthly Pro', startAt: new Date('2026-07-01T00:00:00+05:30'), expiresAt: new Date('2026-08-01T00:00:00+05:30'), timezone: 'Asia/Kolkata', status: 'ACTIVE', ptSessionsTotal: 2, createdBy: admin!.id }).returning();
   await db.insert(membershipEvents).values({ organizationId: org!.id, branchId: branch1!.id, membershipId: mem1!.id, memberId: memberRows[0]!.id, eventType: 'CREATED', actorId: admin!.id, actorName: 'Admin' });
   await db.insert(membershipEvents).values({ organizationId: org!.id, branchId: branch1!.id, membershipId: mem1!.id, memberId: memberRows[0]!.id, eventType: 'ACTIVATED', actorId: admin!.id, actorName: 'Admin' });
 
-  const [mem2] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[1]!.id, planId: plan3!.id, planName: 'Quarterly Gold', startDate: '2026-05-01', endDate: '2026-07-29', status: 'ACTIVE', ptSessionsTotal: 6, createdBy: admin!.id }).returning();
+  const [mem2] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[1]!.id, planId: plan3!.id, planName: 'Quarterly Gold', startAt: new Date('2026-05-01T00:00:00+05:30'), expiresAt: new Date('2026-07-30T00:00:00+05:30'), timezone: 'Asia/Kolkata', status: 'ACTIVE', ptSessionsTotal: 6, createdBy: admin!.id }).returning();
   await db.insert(membershipEvents).values({ organizationId: org!.id, branchId: branch1!.id, membershipId: mem2!.id, memberId: memberRows[1]!.id, eventType: 'CREATED', actorId: admin!.id, actorName: 'Admin' });
 
-  const [mem3] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[2]!.id, planId: plan5!.id, planName: 'Yearly Platinum', startDate: '2025-11-10', endDate: '2026-11-10', status: 'ACTIVE', ptSessionsTotal: 36, createdBy: admin!.id }).returning();
+  const [mem3] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[2]!.id, planId: plan5!.id, planName: 'Yearly Platinum', startAt: new Date('2025-11-10T00:00:00+05:30'), expiresAt: new Date('2026-11-11T00:00:00+05:30'), timezone: 'Asia/Kolkata', status: 'ACTIVE', ptSessionsTotal: 36, createdBy: admin!.id }).returning();
   await db.insert(membershipEvents).values({ organizationId: org!.id, branchId: branch1!.id, membershipId: mem3!.id, memberId: memberRows[2]!.id, eventType: 'CREATED', actorId: admin!.id, actorName: 'Admin' });
 
-  const [mem4] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[3]!.id, planId: plan1!.id, planName: 'Monthly Basic', startDate: '2026-06-01', endDate: '2026-06-30', status: 'EXPIRED', ptSessionsTotal: 0, createdBy: admin!.id }).returning();
+  const [mem4] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[3]!.id, planId: plan1!.id, planName: 'Monthly Basic', startAt: new Date('2026-06-01T00:00:00+05:30'), expiresAt: new Date('2026-07-01T00:00:00+05:30'), timezone: 'Asia/Kolkata', status: 'EXPIRED', ptSessionsTotal: 0, createdBy: admin!.id }).returning();
   await db.insert(membershipEvents).values({ organizationId: org!.id, branchId: branch1!.id, membershipId: mem4!.id, memberId: memberRows[3]!.id, eventType: 'CREATED', actorId: admin!.id, actorName: 'Admin' });
 
-  const [mem5] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[4]!.id, planId: plan4!.id, planName: 'Half-Yearly Elite', startDate: '2026-01-15', endDate: '2026-07-14', status: 'ACTIVE', ptSessionsTotal: 15, createdBy: admin!.id }).returning();
+  const [mem5] = await db.insert(memberMemberships).values({ organizationId: org!.id, branchId: branch1!.id, memberId: memberRows[4]!.id, planId: plan4!.id, planName: 'Half-Yearly Elite', startAt: new Date('2026-01-15T00:00:00+05:30'), expiresAt: new Date('2026-07-15T00:00:00+05:30'), timezone: 'Asia/Kolkata', status: 'ACTIVE', ptSessionsTotal: 15, createdBy: admin!.id }).returning();
 
   // ── 11. Attendance ─────────────────────────────────────────────────────────
   log.info('Seeding attendance...');

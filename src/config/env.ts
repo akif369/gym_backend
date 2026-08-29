@@ -120,7 +120,9 @@ publicWebUrl: optionalEnv(
   },
 
   evolutionGo: evolutionGoConfig(),
-  membershipExpirySweepIntervalMs: optionalEnvNumber('MEMBERSHIP_EXPIRY_SWEEP_INTERVAL_MS', 60 * 60 * 1000),
+  // Runs inexpensive indexed batches; this is intentionally short so F09
+  // group projection is near real-time without a midnight bulk operation.
+  membershipExpirySweepIntervalMs: optionalEnvNumber('MEMBERSHIP_EXPIRY_SWEEP_INTERVAL_MS', 30 * 1000),
   attendanceAutoCheckoutSweepIntervalMs: optionalEnvNumber('ATTENDANCE_AUTO_CHECKOUT_SWEEP_INTERVAL_MS', 60 * 1000),
 
   // ── Derived ──────────────────────────────────────────────────

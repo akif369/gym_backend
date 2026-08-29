@@ -173,15 +173,15 @@ export async function listMembersService(ctx: TenantContext, query: Record<strin
         ORDER BY ${qualifiedColumn('member_memberships', 'created_at')} DESC
         LIMIT 1
       )`,
-      membershipStart: sql<string | null>`(
-        SELECT "member_memberships"."start_date"
+      membershipStart: sql<Date | null>`(
+        SELECT "member_memberships"."start_at"
         FROM "member_memberships"
         WHERE "member_memberships"."member_id" = "members"."id"
         ORDER BY "member_memberships"."created_at" DESC
         LIMIT 1
       )`,
-      membershipExpiry: sql<string | null>`(
-        SELECT "member_memberships"."end_date"
+      membershipExpiry: sql<Date | null>`(
+        SELECT "member_memberships"."expires_at"
         FROM "member_memberships"
         WHERE "member_memberships"."member_id" = "members"."id"
         ORDER BY "member_memberships"."created_at" DESC
@@ -859,28 +859,19 @@ export async function getMemberAccessStatusService(ctx: TenantContext, memberId:
     };
   }
 
-  const tz = member.orgTimezone || 'Asia/Kolkata';
-  const todayStr = (() => {
-    try {
-      const parts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
-      const part = (type: string) => parts.find(item => item.type === type)?.value;
-      return `${part('year')}-${part('month')}-${part('day')}`;
-    } catch {
-      return new Date().toISOString().slice(0, 10);
-    }
-  })();
-
   const [effectiveMembership] = await tx
     .select({
       id: memberMemberships.id,
       status: memberMemberships.status,
-      endDate: memberMemberships.endDate,
+      startAt: memberMemberships.startAt,
+      expiresAt: memberMemberships.expiresAt,
     })
     .from(memberMemberships)
     .where(and(
       eq(memberMemberships.memberId, memberId),
       eq(memberMemberships.status, 'ACTIVE'),
-      sql`${memberMemberships.endDate} >= ${todayStr}`
+      sql`${memberMemberships.startAt} <= NOW()`,
+      sql`${memberMemberships.expiresAt} > NOW()`
     ))
     .orderBy(desc(memberMemberships.createdAt))
     .limit(1);
@@ -908,7 +899,8 @@ export async function getMemberAccessStatusService(ctx: TenantContext, memberId:
     memberStatus: member.status,
     effectiveMembership: {
       id: effectiveMembership.id,
-      endDate: effectiveMembership.endDate,
+      startAt: effectiveMembership.startAt,
+      expiresAt: effectiveMembership.expiresAt,
     }
   };
 }

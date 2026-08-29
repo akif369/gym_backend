@@ -62,11 +62,16 @@ export async function checkInService(
     throw AppError.conflict(ErrorCode.ALREADY_CHECKED_IN, 'Member is already checked in');
   }
 
-  // Validate membership is active.
+  // Authorization uses the database clock and exclusive expiry boundary.
   const [activeMembership] = await db
-    .select({ status: memberMemberships.status, endDate: memberMemberships.endDate, createdAt: memberMemberships.createdAt })
+    .select({ status: memberMemberships.status, expiresAt: memberMemberships.expiresAt, createdAt: memberMemberships.createdAt })
     .from(memberMemberships)
-    .where(and(eq(memberMemberships.memberId, member.id), eq(memberMemberships.status, 'ACTIVE')))
+    .where(and(
+      eq(memberMemberships.memberId, member.id),
+      eq(memberMemberships.status, 'ACTIVE'),
+      sql`${memberMemberships.startAt} <= NOW()`,
+      sql`${memberMemberships.expiresAt} > NOW()`,
+    ))
     .limit(1);
 
   const strictPaymentPolicy = await isStrictPaymentPolicyEnabled(ctx.organizationId);
@@ -85,9 +90,7 @@ export async function checkInService(
     latestPaymentStatus = latestPayment?.status ?? null;
   }
 
-  if (!activeMembership) {
-    log.warn({ memberId: member.id }, 'Check-in attempted without active membership');
-  }
+  if (!activeMembership) throw AppError.badRequest(ErrorCode.MEMBERSHIP_EXPIRED_OR_INACTIVE, 'Member does not have an active membership');
 
   const paymentCoversMembership = Boolean(
     activeMembership
@@ -96,12 +99,10 @@ export async function checkInService(
     && latestPayment.createdAt >= activeMembership.createdAt,
   );
 
-  if (strictPaymentPolicy && (!activeMembership || !paymentCoversMembership)) {
+  if (strictPaymentPolicy && !paymentCoversMembership) {
     throw AppError.badRequest(
       ErrorCode.MEMBERSHIP_EXPIRED_OR_INACTIVE,
-      !activeMembership
-        ? 'Member does not have an active membership'
-        : 'Payment is required before this member can check in',
+      'Payment is required before this member can check in',
     );
   }
 
@@ -201,8 +202,8 @@ export async function getCurrentlyInsideService(ctx: TenantContext) {
         ORDER BY ${qualifiedColumn('member_memberships', 'created_at')} DESC
         LIMIT 1
       )`,
-      membershipEndDate: sql<string | null>`(
-        SELECT ${qualifiedColumn('member_memberships', 'end_date')}
+      membershipExpiresAt: sql<Date | null>`(
+        SELECT ${qualifiedColumn('member_memberships', 'expires_at')}
         FROM ${sql.identifier('member_memberships')}
         WHERE ${qualifiedColumn('member_memberships', 'member_id')} = ${qualifiedColumn('members', 'id')}
         ORDER BY ${qualifiedColumn('member_memberships', 'created_at')} DESC
@@ -223,15 +224,13 @@ export async function getCurrentlyInsideService(ctx: TenantContext) {
 
   return items.map(item => {
     let calculatedMembershipStatus = item.membershipStatusRaw ? String(item.membershipStatusRaw) : 'INACTIVE';
-    if (item.planName && calculatedMembershipStatus !== 'EXPIRED' && item.membershipEndDate) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const exp = new Date(item.membershipEndDate);
-      if (exp < today) {
+    if (item.planName && calculatedMembershipStatus !== 'EXPIRED' && item.membershipExpiresAt) {
+      const exp = new Date(item.membershipExpiresAt);
+      const remainingMs = exp.getTime() - Date.now();
+      if (remainingMs <= 0) {
         calculatedMembershipStatus = 'EXPIRED';
       } else {
-        const diffTime = exp.getTime() - today.getTime();
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+        const diffDays = Math.ceil(remainingMs / (1000 * 60 * 60 * 24));
         if (diffDays <= 7) calculatedMembershipStatus = 'EXPIRING';
       }
     }

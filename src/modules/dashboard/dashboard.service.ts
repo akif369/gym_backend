@@ -32,7 +32,6 @@ export async function getDashboardService(ctx: TenantContext) {
   sevenDaysFromNow.setDate(sevenDaysFromNow.getDate() + 7);
   const todayDate = toISTDateString(today);
   const thisMonthDate = `${todayDate.slice(0, 8)}01`;
-  const expiryDate = toISTDateString(sevenDaysFromNow);
   const attendanceSince = new Date(today);
   attendanceSince.setDate(attendanceSince.getDate() - 6);
   const revenueSince = new Date(now.getFullYear(), now.getMonth() - 5, 1);
@@ -67,7 +66,7 @@ export async function getDashboardService(ctx: TenantContext) {
     db.select({ activeMembers: count() }).from(members).where(and(
       orgFilter(members),
       isNull(members.deletedAt),
-      sql`(SELECT status FROM member_memberships WHERE member_id = ${members.id} ORDER BY created_at DESC LIMIT 1) = 'ACTIVE'`,
+      sql`EXISTS (SELECT 1 FROM member_memberships WHERE member_id = ${members.id} AND status = 'ACTIVE' AND start_at <= NOW() AND expires_at > NOW())`,
     )),
     db.select({ inactiveMembers: count() }).from(members).where(and(orgFilter(members), isNull(members.deletedAt), eq(members.status, 'ARCHIVED'))),
     db.select({ expiredMemberships: count() }).from(members).where(and(
@@ -140,8 +139,8 @@ export async function getDashboardService(ctx: TenantContext) {
       orgFilter(members),
       isNull(members.deletedAt),
       eq(memberMemberships.status, 'ACTIVE'),
-      gte(memberMemberships.endDate, todayDate),
-      lte(memberMemberships.endDate, expiryDate),
+      sql`${memberMemberships.expiresAt} > NOW()`,
+      lte(memberMemberships.expiresAt, sevenDaysFromNow),
     ));
 
   let branchPerformance: any[] = [];
@@ -151,7 +150,7 @@ export async function getDashboardService(ctx: TenantContext) {
       const [mRes, rRes, iRes] = await Promise.all([
         db.select({ activeMembers: count() }).from(members).where(and(
           eq(members.organizationId, ctx.organizationId), eq(members.branchId, b.id), isNull(members.deletedAt),
-          sql`(SELECT status FROM member_memberships WHERE member_id = ${members.id} ORDER BY created_at DESC LIMIT 1) = 'ACTIVE'`
+          sql`EXISTS (SELECT 1 FROM member_memberships WHERE member_id = ${members.id} AND status = 'ACTIVE' AND start_at <= NOW() AND expires_at > NOW())`
         )),
         db.select({ monthRevenue: sum(paymentTransactions.totalAmount) }).from(paymentTransactions).where(and(
           eq(paymentTransactions.organizationId, ctx.organizationId), eq(paymentTransactions.branchId, b.id),

@@ -71,8 +71,12 @@ export const memberMemberships = pgTable('member_memberships', {
     .references(() => members.id, { onDelete: 'cascade' }),
   planId: uuid('plan_id').references(() => membershipPlans.id),
   planName: text('plan_name').notNull(), // denormalized snapshot
-  startDate: date('start_date').notNull(),
-  endDate: date('end_date').notNull(),
+  // Canonical access boundaries. startAt is inclusive, expiresAt is exclusive.
+  // Both are UTC instants; timezone snapshots the business timezone used to
+  // calculate their local-midnight boundaries.
+  startAt: timestamp('start_at', { withTimezone: true }).notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  timezone: text('timezone').notNull(),
   status: membershipStatusEnum('status').notNull().default('PENDING'),
   freezeStartDate: date('freeze_start_date'),
   freezeEndDate: date('freeze_end_date'),
@@ -88,7 +92,9 @@ export const memberMemberships = pgTable('member_memberships', {
   check('memberships_pt_total_check', sql`${table.ptSessionsTotal} >= 0`),
   check('memberships_pt_used_check', sql`${table.ptSessionsUsed} >= 0 AND ${table.ptSessionsUsed} <= ${table.ptSessionsTotal}`),
   check('memberships_frozen_days_check', sql`${table.frozenDays} >= 0`),
-  index('membership_status_idx').on(table.memberId, table.status, table.endDate),
+  index('membership_member_access_idx').on(table.memberId, table.status, table.startAt, table.expiresAt),
+  index('membership_expiry_pending_idx').on(table.expiresAt).where(sql`${table.status} = 'ACTIVE'`),
+  check('membership_valid_window_check', sql`${table.expiresAt} > ${table.startAt}`),
   foreignKey({
     columns: [table.branchId, table.organizationId],
     foreignColumns: [branches.id, branches.organizationId],
