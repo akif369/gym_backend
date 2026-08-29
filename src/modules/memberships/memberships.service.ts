@@ -589,10 +589,16 @@ export async function sweepInactiveMembersService() {
 
       if (sweepCandidates.length === 0) continue;
 
-      // Batch fetch all memberships to eliminate N+1 queries (production grade)
+      // Batch fetch all memberships to eliminate N+1 queries.
       const candidateIds = sweepCandidates.map(m => m.id);
       const allPlans = await tx
-        .select({ memberId: memberMemberships.memberId, status: memberMemberships.status, expiresAt: memberMemberships.expiresAt })
+        .select({
+          memberId: memberMemberships.memberId,
+          status: memberMemberships.status,
+          expiresAt: memberMemberships.expiresAt,
+          createdAt: memberMemberships.createdAt,
+          updatedAt: memberMemberships.updatedAt,
+        })
         .from(memberMemberships)
         .where(inArray(memberMemberships.memberId, candidateIds));
 
@@ -604,15 +610,22 @@ export async function sweepInactiveMembersService() {
       }
 
       for (const member of sweepCandidates) {
-        // Get plans for this member and sort descending by their exclusive expiry.
+        // The latest membership record owns lifecycle state. Do not use the
+        // furthest expiry: a cancelled membership may retain its old expiry.
         const memberPlans = plansByMember.get(member.id) || [];
-        memberPlans.sort((a, b) => b.expiresAt.getTime() - a.expiresAt.getTime());
+        memberPlans.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 
-        const hasActive = memberPlans.some(p => p.status === 'ACTIVE' || p.status === 'FROZEN');
+        const now = new Date();
+        const hasActive = memberPlans.some(p =>
+          (p.status === 'ACTIVE' && p.expiresAt > now) || p.status === 'FROZEN'
+        );
         const latestPlan = memberPlans[0];
         
         let shouldBeInactive = false;
-        if (!hasActive && latestPlan && ['EXPIRED', 'CANCELLED'].includes(latestPlan.status) && latestPlan.expiresAt < cutoffAt) {
+        const lifecycleEndedAt = latestPlan?.status === 'CANCELLED'
+          ? latestPlan.updatedAt
+          : latestPlan?.expiresAt;
+        if (!hasActive && latestPlan && ['EXPIRED', 'CANCELLED'].includes(latestPlan.status) && lifecycleEndedAt && lifecycleEndedAt <= cutoffAt) {
           shouldBeInactive = true;
         }
 

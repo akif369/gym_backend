@@ -74,6 +74,7 @@ export async function listMembersService(ctx: TenantContext, query: Record<strin
 
   const search = query['search'] as string | undefined;
   const membershipStatus = query['membershipStatus'] as string | undefined;
+  const lifecycle = query['lifecycle'] as string | undefined;
   const status = query['status'] as string | undefined;
   const branchId = query['branchId'] as string | undefined;
 
@@ -138,6 +139,48 @@ export async function listMembersService(ctx: TenantContext, query: Record<strin
     }
   }
 
+  const baseWhereClause = and(...conditions);
+
+  // Keep lifecycle rules on the server. The UI must not infer access state
+  // from a formatted date, otherwise timezone and pagination differences can
+  // produce inconsistent dashboard counts.
+  const latestMembershipStatus = sql<string | null>`(
+    SELECT "member_memberships"."status"::text
+    FROM "member_memberships"
+    WHERE "member_memberships"."member_id" = "members"."id"
+    ORDER BY "member_memberships"."created_at" DESC
+    LIMIT 1
+  )`;
+  const latestMembershipStart = sql<Date | null>`(
+    SELECT "member_memberships"."start_at"
+    FROM "member_memberships"
+    WHERE "member_memberships"."member_id" = "members"."id"
+    ORDER BY "member_memberships"."created_at" DESC
+    LIMIT 1
+  )`;
+  const latestMembershipExpiry = sql<Date | null>`(
+    SELECT "member_memberships"."expires_at"
+    FROM "member_memberships"
+    WHERE "member_memberships"."member_id" = "members"."id"
+    ORDER BY "member_memberships"."created_at" DESC
+    LIMIT 1
+  )`;
+  const isActiveAccess = sql`${members.status} = 'ACTIVE'
+    AND ${latestMembershipStatus} = 'ACTIVE'
+    AND ${latestMembershipStart} <= NOW()
+    AND ${latestMembershipExpiry} > NOW()`;
+  const isExpiringSoon = sql`${isActiveAccess}
+    AND ${latestMembershipExpiry} <= NOW() + INTERVAL '7 days'`;
+  const isExpiredGrace = sql`${members.status} NOT IN ('INACTIVE', 'ARCHIVED')
+    AND ${latestMembershipStatus} IN ('EXPIRED', 'CANCELLED')`;
+  const isInactiveLifecycle = sql`${members.status} IN ('INACTIVE', 'ARCHIVED')
+    OR ${latestMembershipStatus} IS NULL`;
+
+  if (lifecycle === 'ACTIVE') conditions.push(isActiveAccess);
+  if (lifecycle === 'EXPIRING') conditions.push(isExpiringSoon);
+  if (lifecycle === 'EXPIRED') conditions.push(isExpiredGrace);
+  if (lifecycle === 'INACTIVE') conditions.push(isInactiveLifecycle);
+
   const whereClause = and(...conditions);
 
   const totalRes = await db
@@ -145,6 +188,16 @@ export async function listMembersService(ctx: TenantContext, query: Record<strin
     .from(members)
     .where(whereClause);
   const total = totalRes[0]?.total ?? 0;
+
+  const [summary] = await db
+    .select({
+      active: sql<number>`count(*) FILTER (WHERE ${isActiveAccess})`,
+      expiring: sql<number>`count(*) FILTER (WHERE ${isExpiringSoon})`,
+      expired: sql<number>`count(*) FILTER (WHERE ${isExpiredGrace})`,
+      inactive: sql<number>`count(*) FILTER (WHERE ${isInactiveLifecycle})`,
+    })
+    .from(members)
+    .where(baseWhereClause);
 
   const qualifiedColumn = (table: string, column: string) =>
     sql`${sql.identifier(table)}.${sql.identifier(column)}`;
@@ -200,6 +253,7 @@ export async function listMembersService(ctx: TenantContext, query: Record<strin
         ORDER BY "member_memberships"."created_at" DESC
         LIMIT 1
       ), 'INACTIVE')`,
+      membershipExpiringSoon: sql<boolean>`COALESCE(${isExpiringSoon}, false)`,
       lastVisit: sql<Date | null>`(
         SELECT "attendance_logs"."check_in_at"
         FROM "attendance_logs"
@@ -231,7 +285,15 @@ export async function listMembersService(ctx: TenantContext, query: Record<strin
     .limit(limit)
     .offset(offset);
 
-  return buildPaginatedResponse(items, total ?? 0, { page, pageSize });
+  return {
+    ...buildPaginatedResponse(items, total ?? 0, { page, pageSize }),
+    summary: {
+      active: Number(summary?.active ?? 0),
+      expiring: Number(summary?.expiring ?? 0),
+      expired: Number(summary?.expired ?? 0),
+      inactive: Number(summary?.inactive ?? 0),
+    },
+  };
 }
 
 // ── Create Member ─────────────────────────────────────────────────────────────
