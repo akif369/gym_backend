@@ -22,6 +22,12 @@ function optionalEnvNumber(key: string, defaultValue: number): number {
   return parsed;
 }
 
+function optionalPositiveEnvNumber(key: string, defaultValue: number): number {
+  const value = optionalEnvNumber(key, defaultValue);
+  if (value < 1) throw new Error(`Environment variable ${key} must be at least 1, got: ${value}`);
+  return value;
+}
+
 function optionalEnvBoolean(key: string, defaultValue: boolean): boolean {
   const raw = process.env[key];
   if (raw === undefined) return defaultValue;
@@ -122,8 +128,17 @@ publicWebUrl: optionalEnv(
   evolutionGo: evolutionGoConfig(),
   // Runs inexpensive indexed batches; this is intentionally short so F09
   // group projection is near real-time without a midnight bulk operation.
-  membershipExpirySweepIntervalMs: optionalEnvNumber('MEMBERSHIP_EXPIRY_SWEEP_INTERVAL_MS', 30 * 1000),
+  membershipExpirySweepIntervalMs: optionalEnvNumber('MEMBERSHIP_EXPIRY_SWEEP_INTERVAL_MS', 5 * 60 * 1000),
+  membershipExpiryBatchSize: optionalEnvNumber('MEMBERSHIP_EXPIRY_BATCH_SIZE', 200),
+  inactiveMemberSweepIntervalMs: optionalEnvNumber('INACTIVE_MEMBER_SWEEP_INTERVAL_MS', 60 * 60 * 1000),
+  inactiveMemberSweepBatchSize: optionalEnvNumber('INACTIVE_MEMBER_SWEEP_BATCH_SIZE', 200),
+  biometricSyncWorkerIntervalMs: optionalEnvNumber('BIOMETRIC_SYNC_WORKER_INTERVAL_MS', 30 * 1000),
+  biometricCommandMaxAttempts: optionalPositiveEnvNumber('BIOMETRIC_COMMAND_MAX_ATTEMPTS', 6),
+  biometricCommandCleanupBatchSize: optionalPositiveEnvNumber('BIOMETRIC_COMMAND_CLEANUP_BATCH_SIZE', 500),
+  biometricDeviceOfflineAfterMs: optionalPositiveEnvNumber('BIOMETRIC_DEVICE_OFFLINE_AFTER_MS', 10 * 60 * 1000),
   attendanceAutoCheckoutSweepIntervalMs: optionalEnvNumber('ATTENDANCE_AUTO_CHECKOUT_SWEEP_INTERVAL_MS', 60 * 1000),
+  attendanceAutoCheckoutBatchSize: optionalEnvNumber('ATTENDANCE_AUTO_CHECKOUT_BATCH_SIZE', 200),
+  schedulerStartupJitterMs: optionalEnvNumber('SCHEDULER_STARTUP_JITTER_MS', 30 * 1000),
 
   // ── Derived ──────────────────────────────────────────────────
   isProduction: optionalEnv('NODE_ENV', 'development') === 'production',

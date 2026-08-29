@@ -7,6 +7,7 @@ import { auditLog } from '../../common/audit/auditLog';
 import { AuditAction } from '../../db/schema/audit.schema';
 import { createLogger } from '../../common/logger/index';
 import { config } from '../../config/env';
+import { startStaggeredRecurring } from '../../common/scheduler/staggeredRecurring';
 
 const log = createLogger('attendance-auto-checkout-scheduler');
 
@@ -46,7 +47,8 @@ export async function autoCheckOutSweep() {
           eq(attendanceLogs.branchId, branch.id),
           isNull(attendanceLogs.checkOutAt),
           lte(attendanceLogs.checkInAt, cutoff),
-        ));
+        ))
+        .limit(config.attendanceAutoCheckoutBatchSize);
 
       for (const session of expiredSessions) {
         const [updated] = await tx
@@ -89,7 +91,8 @@ export async function autoCheckOutSweep() {
           isNull(attendanceLogs.branchId),
           isNull(attendanceLogs.checkOutAt),
           lte(attendanceLogs.checkInAt, cutoff),
-        ));
+        ))
+        .limit(config.attendanceAutoCheckoutBatchSize);
 
       for (const session of expiredSessions) {
         const [updated] = await tx
@@ -129,8 +132,9 @@ export function startAttendanceAutoCheckoutScheduler() {
     }
   };
 
-  void run();
-  const timer = setInterval(() => void run(), config.attendanceAutoCheckoutSweepIntervalMs);
-  timer.unref();
-  return () => clearInterval(timer);
+  return startStaggeredRecurring(
+    run,
+    config.attendanceAutoCheckoutSweepIntervalMs,
+    config.schedulerStartupJitterMs,
+  );
 }

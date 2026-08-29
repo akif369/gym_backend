@@ -465,7 +465,7 @@ export async function renewMembershipService(
   return membership;
 }
 
-export async function expireDueMembershipsService() {
+export async function expireDueMembershipsService(batchSize = 200) {
   const expiredMemberships = await db.transaction(async (tx) => {
     // 1002 is a unique ID for the expiry sweep
     const result = await tx.execute<{ pg_try_advisory_xact_lock: boolean }>(sql`SELECT pg_try_advisory_xact_lock(1002)`);
@@ -486,7 +486,7 @@ export async function expireDueMembershipsService() {
         sql`${memberMemberships.expiresAt} <= NOW()`,
       ))
       .orderBy(asc(memberMemberships.expiresAt))
-      .limit(500)
+      .limit(batchSize)
       .for('update', { skipLocked: true });
 
     const newlyExpired = [];
@@ -551,7 +551,7 @@ export async function expireDueMembershipsService() {
   return { expired, notified };
 }
 
-export async function sweepInactiveMembersService() {
+export async function sweepInactiveMembersService(batchSize = 200) {
   return await db.transaction(async (tx) => {
     // 1003 is a unique ID for the inactivity sweep
     const result = await tx.execute<{ pg_try_advisory_xact_lock: boolean }>(sql`SELECT pg_try_advisory_xact_lock(1003)`);
@@ -576,76 +576,67 @@ export async function sweepInactiveMembersService() {
       const cutoffString = addCalendarDays(dateInTimeZone(new Date(), target.timezone), -daysBeforeInactive);
       const cutoffAt = localMidnightToUtc(cutoffString, target.timezone);
 
-      // Find members for this target (branch or org fallback) who are not ARCHIVED
+      // Select only members that are genuinely due for inactivity. Limiting the
+      // full member population before this decision can repeatedly select recent
+      // members and starve older expired accounts.
       const sweepCandidates = await tx
         .select({ id: members.id, status: members.status })
         .from(members)
+        .innerJoin(memberMemberships, sql`${memberMemberships.id} = (
+          SELECT latest_membership.id
+          FROM member_memberships AS latest_membership
+          WHERE latest_membership.member_id = ${members.id}
+          ORDER BY latest_membership.created_at DESC, latest_membership.id DESC
+          LIMIT 1
+        )`)
         .where(and(
           eq(members.organizationId, target.orgId),
           target.branchId ? eq(members.branchId, target.branchId) : isNull(members.branchId),
           ne(members.status, 'ARCHIVED'),
-          isNull(members.deletedAt)
-        ));
+          ne(members.status, 'INACTIVE'),
+          isNull(members.deletedAt),
+          inArray(memberMemberships.status, ['EXPIRED', 'CANCELLED']),
+          lte(sql`CASE
+            WHEN ${memberMemberships.status} = 'CANCELLED' THEN ${memberMemberships.updatedAt}
+            ELSE ${memberMemberships.expiresAt}
+          END`, cutoffAt),
+          sql`NOT EXISTS (
+            SELECT 1
+            FROM member_memberships AS active_membership
+            WHERE active_membership.member_id = ${members.id}
+              AND (
+                (active_membership.status = 'ACTIVE' AND active_membership.expires_at > NOW())
+                OR active_membership.status = 'FROZEN'
+              )
+          )`,
+        ))
+        .orderBy(asc(sql`CASE
+          WHEN ${memberMemberships.status} = 'CANCELLED' THEN ${memberMemberships.updatedAt}
+          ELSE ${memberMemberships.expiresAt}
+        END`), asc(members.id))
+        .limit(batchSize);
 
       if (sweepCandidates.length === 0) continue;
 
-      // Batch fetch all memberships to eliminate N+1 queries.
-      const candidateIds = sweepCandidates.map(m => m.id);
-      const allPlans = await tx
-        .select({
-          memberId: memberMemberships.memberId,
-          status: memberMemberships.status,
-          expiresAt: memberMemberships.expiresAt,
-          createdAt: memberMemberships.createdAt,
-          updatedAt: memberMemberships.updatedAt,
-        })
-        .from(memberMemberships)
-        .where(inArray(memberMemberships.memberId, candidateIds));
-
-      // Group memberships in memory by memberId
-      const plansByMember = new Map<string, typeof allPlans>();
-      for (const plan of allPlans) {
-        if (!plansByMember.has(plan.memberId)) plansByMember.set(plan.memberId, []);
-        plansByMember.get(plan.memberId)!.push(plan);
-      }
-
       for (const member of sweepCandidates) {
-        // The latest membership record owns lifecycle state. Do not use the
-        // furthest expiry: a cancelled membership may retain its old expiry.
-        const memberPlans = plansByMember.get(member.id) || [];
-        memberPlans.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+        // The candidate query is the lifecycle decision; retain a conditional
+        // update so the operation remains idempotent across retries.
+        const [updated] = await tx.update(members)
+          .set({ status: 'INACTIVE', updatedAt: new Date() })
+          .where(and(eq(members.id, member.id), ne(members.status, 'INACTIVE')))
+          .returning({ id: members.id });
+        if (!updated) continue;
 
-        const now = new Date();
-        const hasActive = memberPlans.some(p =>
-          (p.status === 'ACTIVE' && p.expiresAt > now) || p.status === 'FROZEN'
-        );
-        const latestPlan = memberPlans[0];
-        
-        let shouldBeInactive = false;
-        const lifecycleEndedAt = latestPlan?.status === 'CANCELLED'
-          ? latestPlan.updatedAt
-          : latestPlan?.expiresAt;
-        if (!hasActive && latestPlan && ['EXPIRED', 'CANCELLED'].includes(latestPlan.status) && lifecycleEndedAt && lifecycleEndedAt <= cutoffAt) {
-          shouldBeInactive = true;
-        }
+        inactiveMarked += 1;
+        await auditLog({
+          organizationId: target.orgId,
+          action: AuditAction.MEMBER_UPDATED,
+          entityType: 'member',
+          entityId: member.id,
+          description: `Member status updated to INACTIVE due to ${daysBeforeInactive} days of expiry`,
+        }, tx);
 
-        if (shouldBeInactive && member.status !== 'INACTIVE') {
-          // Mark member as INACTIVE (Manual account status lifecycle respects not reverting)
-          await tx.update(members)
-            .set({ status: 'INACTIVE', updatedAt: new Date() })
-            .where(eq(members.id, member.id));
-          inactiveMarked += 1;
-          
-          await auditLog({
-            organizationId: target.orgId,
-            action: AuditAction.MEMBER_UPDATED,
-            entityType: 'member',
-            entityId: member.id,
-            description: `Member status updated to INACTIVE due to ${daysBeforeInactive} days of expiry`,
-          }, tx);
-
-          await recordMemberBiometricAccessIntent({ organizationId: target.orgId } as TenantContext, member.id, 99, tx);
-        }
+        await recordMemberBiometricAccessIntent({ organizationId: target.orgId } as TenantContext, member.id, 99, tx);
       }
     }
     return { inactiveMarked };

@@ -5,6 +5,7 @@ import {
   admsGetRequest,
   admsDeviceCmd,
   listDevices,
+  biometricHealth,
   listIdentities,
   registerDevice,
   deleteDevice,
@@ -15,34 +16,12 @@ import {
 } from './biometrics.controller';
 import { requireAuth } from '../../common/auth/requireAuth';
 
+/** F09 ADMS protocol endpoints. Devices authenticate by their registered serial number. */
 export async function biometricsAdmsRoutes(app: FastifyInstance) {
-  // --- TEMPORARY DIAGNOSTIC LOGGING ---
-  app.addHook('onRequest', async (req) => {
-    if (req.url.includes('/iclock/')) {
-      console.log('\n');
-      console.log('==============================================');
-      console.log('🔥 ZKTECO RAW HTTP REQUEST');
-      console.log('==============================================');
-      console.log('METHOD:', req.method);
-      console.log('URL:', req.url);
-      console.log('QUERY:', req.query);
-      console.log('CONTENT-TYPE:', req.headers['content-type']);
-      console.log('USER-AGENT:', req.headers['user-agent']);
-      console.log('==============================================');
-    }
-  });
-  // ------------------------------------
-
-  // ADMS routes must NOT have requireAuth, because devices use their own protocol
-  // Depending on device settings, these could be at root or under /iclock
-  
-  // Note: Drizzle / Fastify allows GET/POST on same route path.
   app.post('/registry', admsRegistry);
-  app.get('/registry', admsRegistry); // some firmwares use GET
-  
+  app.get('/registry', admsRegistry);
   app.post('/cdata', admsCdata);
   app.get('/cdata', admsCdata);
-  
   app.get('/getrequest', admsGetRequest);
   app.post('/devicecmd', admsDeviceCmd);
 }
@@ -51,6 +30,7 @@ export async function biometricsApiRoutes(app: FastifyInstance) {
   app.addHook('onRequest', requireAuth);
 
   app.get('/', listDevices);
+  app.get('/health', biometricHealth);
   app.get('/identities', listIdentities);
   app.post('/', registerDevice);
   app.delete('/:deviceId', deleteDevice);

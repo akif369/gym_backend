@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { startMembershipExpiryScheduler } from './modules/memberships/memberships.scheduler';
 import { startAttendanceAutoCheckoutScheduler } from './modules/attendance/attendance.scheduler';
+import { verifyBiometricInfrastructure } from './modules/biometrics/biometrics.service';
 
 // ── Ensure upload directory exists ────────────────────────────────────────────
 const uploadDir = path.resolve(config.uploadDir);
@@ -28,8 +29,10 @@ async function start() {
     if (isDatabaseConnected) {
       logger.info('Database connection verified');
     } else {
-      logger.warn('Database connection check failed');
+      throw new Error('Database connection check failed');
     }
+    await verifyBiometricInfrastructure();
+    logger.info('Biometric database infrastructure verified');
 
     // Ensure S3 bucket exists
     const { ensureBucketExists } = await import('./common/storage/s3');

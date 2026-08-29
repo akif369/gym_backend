@@ -4,8 +4,9 @@ import { attendanceLogs } from '../../db/schema/attendance.schema';
 import { members } from '../../db/schema/members.schema';
 import { memberMemberships } from '../../db/schema/memberships.schema';
 import { organizations, branches } from '../../db/schema/org.schema';
-import { eq, and, desc, asc, isNull, sql, lt, inArray, lte } from 'drizzle-orm';
+import { eq, and, desc, asc, isNull, sql, lt, inArray, lte, count } from 'drizzle-orm';
 import { createLogger } from '../../common/logger/index';
+import { config } from '../../config/env';
 import crypto from 'crypto';
 import { AppError, ErrorCode } from '../../common/errors/AppError';
 import { getMemberAccessStatusService } from '../members/members.service';
@@ -87,6 +88,7 @@ export async function recordMemberBiometricAccessIntent(
         desiredGroup,
         desiredVersion: sql`${deviceAccessStates.desiredVersion} + 1`,
         status: 'PENDING',
+        attemptCount: 0,
         nextAttemptAt: new Date(),
         lastError: null,
         lastDesiredAt: new Date(),
@@ -94,27 +96,89 @@ export async function recordMemberBiometricAccessIntent(
       },
     });
   }
+
+  // A newer desired version supersedes any queued or in-flight command. Keep
+  // the audit history, but prevent an obsolete command from being delivered.
+  await tx.execute(sql`
+    UPDATE biometric_device_commands AS command
+    SET status = 'CANCELLED', completed_at = NOW()
+    FROM device_access_states AS state
+    WHERE command.access_state_id = state.id
+      AND state.member_id = ${memberId}
+      AND command.status IN ('PENDING', 'SENT')
+      AND command.desired_version < state.desired_version
+  `);
   return { statesRecorded: devices.length };
 }
 
-const retryDelayMs = (attempt: number) => Math.min(15 * 60_000, [10_000, 30_000, 60_000, 120_000, 300_000][Math.min(attempt, 4)] ?? 900_000);
+const BIOMETRIC_WORKER_LOCK_ID = 1004;
+const retryDelayMs = (attemptCount: number) => Math.min(
+  30 * 60_000,
+  [30_000, 60_000, 120_000, 300_000, 900_000, 1_800_000][Math.min(Math.max(0, attemptCount - 1), 5)] ?? 1_800_000,
+);
+
+function attemptsExhausted(attemptCount: number) {
+  return attemptCount >= config.biometricCommandMaxAttempts;
+}
+
+/** Cancel in-flight commands that no longer represent a member's desired access group. */
+export async function cancelObsoleteDeviceAccessCommands(limit = config.biometricCommandCleanupBatchSize) {
+  const cancelled = await db.execute<{ id: string }>(sql`
+    WITH obsolete AS (
+      SELECT command.id
+      FROM biometric_device_commands AS command
+      INNER JOIN device_access_states AS state ON state.id = command.access_state_id
+      WHERE command.status IN ('PENDING', 'SENT')
+        AND command.desired_version IS NOT NULL
+        AND command.desired_version < state.desired_version
+      ORDER BY command.created_at ASC
+      LIMIT ${limit}
+      FOR UPDATE OF command SKIP LOCKED
+    )
+    UPDATE biometric_device_commands AS command
+    SET status = 'CANCELLED', completed_at = NOW()
+    FROM obsolete
+    WHERE command.id = obsolete.id
+    RETURNING command.id
+  `);
+  return { cancelled: cancelled.length };
+}
 
 /** Requeue ADMS deliveries that were sent but not acknowledged before timeout. */
 export async function recoverStaleDeviceAccessStates() {
   const stale = await db.select().from(deviceAccessStates)
     .where(and(eq(deviceAccessStates.status, 'SENT'), lte(deviceAccessStates.nextAttemptAt, new Date())))
     .limit(100);
-  for (const state of stale) {
-    await db.transaction(async (tx) => {
+  let recovered = 0;
+  let permanentlyFailed = 0;
+  for (const candidate of stale) {
+    const outcome = await db.transaction(async (tx) => {
+      const [state] = await tx.select().from(deviceAccessStates)
+        .where(eq(deviceAccessStates.id, candidate.id))
+        .limit(1)
+        .for('update');
+      if (!state || state.status !== 'SENT' || state.desiredVersion !== candidate.desiredVersion) return 'SKIPPED';
+
       await tx.update(biometricDeviceCommands)
         .set({ status: 'FAILED', completedAt: new Date() })
         .where(and(eq(biometricDeviceCommands.accessStateId, state.id), eq(biometricDeviceCommands.desiredVersion, state.desiredVersion), eq(biometricDeviceCommands.status, 'SENT')));
+
+      if (attemptsExhausted(state.attemptCount)) {
+        await tx.update(deviceAccessStates)
+          .set({ status: 'FAILED', nextAttemptAt: new Date(), lastError: `ADMS acknowledgement timed out after ${state.attemptCount} attempts`, updatedAt: new Date() })
+          .where(and(eq(deviceAccessStates.id, state.id), eq(deviceAccessStates.status, 'SENT'), eq(deviceAccessStates.desiredVersion, state.desiredVersion)));
+        return 'FAILED';
+      }
+
       await tx.update(deviceAccessStates)
         .set({ status: 'PENDING', nextAttemptAt: new Date(Date.now() + retryDelayMs(state.attemptCount)), lastError: 'ADMS acknowledgement timeout', updatedAt: new Date() })
         .where(and(eq(deviceAccessStates.id, state.id), eq(deviceAccessStates.status, 'SENT'), eq(deviceAccessStates.desiredVersion, state.desiredVersion)));
+      return 'RECOVERED';
     });
+    if (outcome === 'RECOVERED') recovered += 1;
+    if (outcome === 'FAILED') permanentlyFailed += 1;
   }
-  return { recovered: stale.length };
+  return { recovered, permanentlyFailed };
 }
 
 /**
@@ -131,6 +195,7 @@ export async function queuePendingDeviceAccessCommands(limit = 100) {
     .limit(limit);
   const claimedDevices = new Set<string>();
   let queued = 0;
+  let permanentlyFailed = 0;
 
   for (const { state, device, member } of pending) {
     if (claimedDevices.has(device.id)) continue;
@@ -138,6 +203,13 @@ export async function queuePendingDeviceAccessCommands(limit = 100) {
     await db.transaction(async (tx) => {
       const [fresh] = await tx.select().from(deviceAccessStates).where(eq(deviceAccessStates.id, state.id)).limit(1).for('update');
       if (!fresh || fresh.status !== 'PENDING' || fresh.desiredVersion !== state.desiredVersion) return;
+      if (attemptsExhausted(fresh.attemptCount)) {
+        await tx.update(deviceAccessStates)
+          .set({ status: 'FAILED', nextAttemptAt: new Date(), lastError: `ADMS delivery exceeded ${config.biometricCommandMaxAttempts} attempts`, updatedAt: new Date() })
+          .where(eq(deviceAccessStates.id, fresh.id));
+        permanentlyFailed += 1;
+        return;
+      }
       const pin = resolveBiometricPin(undefined, member.memberNumber);
       if (!pin) {
         await tx.update(deviceAccessStates).set({ status: 'FAILED', lastError: 'Member has no valid numeric biometric PIN', nextAttemptAt: new Date(Date.now() + 15 * 60_000), updatedAt: new Date() }).where(eq(deviceAccessStates.id, fresh.id));
@@ -171,13 +243,40 @@ export async function queuePendingDeviceAccessCommands(limit = 100) {
       queued += 1;
     });
   }
-  return { queued };
+  return { queued, permanentlyFailed };
+}
+
+/** Mark devices offline when they stop contacting ADMS for the configured interval. */
+export async function markOfflineBiometricDevices() {
+  const cutoff = new Date(Date.now() - config.biometricDeviceOfflineAfterMs);
+  const offline = await db.update(biometricDevices)
+    .set({ status: 'OFFLINE', updatedAt: new Date() })
+    .where(and(eq(biometricDevices.status, 'ONLINE'), lte(biometricDevices.lastSeenAt, cutoff)))
+    .returning({ id: biometricDevices.id });
+  return { offlineMarked: offline.length };
 }
 
 export async function runDeviceAccessSyncWorker() {
-  const recovered = await recoverStaleDeviceAccessStates();
-  const queued = await queuePendingDeviceAccessCommands();
-  return { ...recovered, ...queued };
+  return db.transaction(async (tx) => {
+    const result = await tx.execute<{ pg_try_advisory_xact_lock: boolean }>(sql`SELECT pg_try_advisory_xact_lock(${BIOMETRIC_WORKER_LOCK_ID})`);
+    if (!result[0]?.pg_try_advisory_xact_lock) {
+      log.debug('Biometric sync worker is already running on another instance, skipping.');
+      return { recovered: 0, queued: 0, permanentlyFailed: 0, cancelled: 0, offlineMarked: 0, skipped: true };
+    }
+
+    const cancelled = await cancelObsoleteDeviceAccessCommands();
+    const recovered = await recoverStaleDeviceAccessStates();
+    const queued = await queuePendingDeviceAccessCommands();
+    const offline = await markOfflineBiometricDevices();
+    return {
+      recovered: recovered.recovered,
+      queued: queued.queued,
+      permanentlyFailed: recovered.permanentlyFailed + queued.permanentlyFailed,
+      cancelled: cancelled.cancelled,
+      offlineMarked: offline.offlineMarked,
+      skipped: false,
+    };
+  });
 }
 
 export async function processAdmsAttendance(
@@ -278,6 +377,23 @@ export async function processAdmsAttendance(
               log.info({ memberId: identity.memberId, eventId: event.id }, 'Processed biometric check-out');
             }
           } else {
+            // Defense in depth: the F09 should deny Group 99 members, but the
+            // server must also enforce the exact membership window in case the
+            // device has stale access data or is manually configured.
+            const accessStatus = await getMemberAccessStatusService({
+              organizationId: device.organizationId,
+              userId: 'SYSTEM',
+              activeBranchId: device.branchId,
+              accessibleBranchIds: device.branchId ? [device.branchId] : [],
+              role: 'SYSTEM',
+              permissions: [],
+              organizationMode: 'SINGLE_GYM',
+            }, identity.memberId);
+            if (!accessStatus.allowed) {
+              log.info({ memberId: identity.memberId, eventId: event.id, accessStatus: accessStatus.accessStatus }, 'Ignored biometric check-in for member without active access');
+              continue;
+            }
+
             // Not checked in. Treat punch as Check In.
             // Check last checkout to avoid spam (cooldown 1 minute)
             const [lastLog] = await db.select().from(attendanceLogs)
@@ -311,14 +427,18 @@ export async function processAdmsAttendance(
 
 // ADMS Commands Queue
 
-// Helper to get next ADMS numeric ID using a Postgres sequence
-async function getNextAdmsCommandId(): Promise<number> {
-  // Older installations may have applied the adms_command_id column migration
-  // before the sequence was added. Keep command delivery self-healing and safe
-  // for those databases; the migration also creates this sequence for new ones.
-  await db.execute(sql`
-    CREATE SEQUENCE IF NOT EXISTS biometric_adms_command_id_seq
+/** Verify that the database migration which owns the ADMS sequence was applied. */
+export async function verifyBiometricInfrastructure() {
+  const [result] = await db.execute<{ sequence_name: string | null }>(sql`
+    SELECT to_regclass('public.biometric_adms_command_id_seq')::text AS sequence_name
   `);
+  if (!result?.sequence_name) {
+    throw new Error('Missing biometric_adms_command_id_seq. Apply database migrations before starting the API.');
+  }
+}
+
+// Helper to get next ADMS numeric ID using the sequence created by migration 0015.
+async function getNextAdmsCommandId(): Promise<number> {
   const result = await db.execute(sql`
     SELECT nextval('biometric_adms_command_id_seq') AS id
   `);
@@ -329,11 +449,6 @@ export async function processAdmsGetRequest(
   serialNumber: string
 ): Promise<string> {
   const sn = String(serialNumber).trim();
-
-  console.log('\n========================================');
-  console.log('[ADMS GETREQUEST]');
-  console.log('Device SN:', sn);
-  console.log('========================================');
 
   // Also update lastSeenAt to keep device ONLINE (added back for safety)
   await db.update(biometricDevices)
@@ -365,33 +480,14 @@ export async function processAdmsGetRequest(
     .limit(1);
 
   if (!command) {
-    console.log(
-      `[ADMS GETREQUEST] No PENDING command for ${sn}`
-    );
-
     return 'OK';
   }
-
-  console.log(
-    '[ADMS GETREQUEST] Found command:',
-    command.id
-  );
-
-  console.log(
-    '[ADMS GETREQUEST] Command:',
-    command.commandString
-  );
 
   // ----------------------------------------------------------
   // 2. Generate numeric ADMS ID
   // ----------------------------------------------------------
 
   const admsCommandId = await getNextAdmsCommandId();
-
-  console.log(
-    '[ADMS GETREQUEST] ADMS ID:',
-    admsCommandId
-  );
 
   // ----------------------------------------------------------
   // 3. IMPORTANT:
@@ -420,10 +516,6 @@ export async function processAdmsGetRequest(
     .returning();
 
   if (!updated) {
-    console.warn(
-      '[ADMS GETREQUEST] Command was already claimed.'
-    );
-
     return 'OK';
   }
 
@@ -434,34 +526,18 @@ export async function processAdmsGetRequest(
   const response =
     `C:${admsCommandId}:${command.commandString}\n`;
 
-  console.log(
-    '[ADMS GETREQUEST] Sending:'
-  );
-
-  console.log(
-    JSON.stringify(response)
-  );
-
-  console.log(
-    '[ADMS GETREQUEST] DB UUID:',
-    command.id
-  );
-
-  console.log(
-    '[ADMS GETREQUEST] ADMS ID:',
-    admsCommandId
-  );
-
-  console.log(
-    '[ADMS GETREQUEST] Status: SENT'
-  );
+  log.debug({ deviceSn: sn, commandId: command.id, admsCommandId }, 'Delivered pending ADMS command to device');
 
   return response;
 }
 
 export async function processAdmsDeviceCmd(deviceSn: string, payload: string) {
-  log.info({ deviceSn, payload }, 'Received ADMS devicecmd payload');
+  log.debug({ deviceSn, payloadBytes: Buffer.byteLength(payload) }, 'Received ADMS device command acknowledgement');
   if (!payload) return;
+
+  await db.update(biometricDevices)
+    .set({ lastSeenAt: new Date(), status: 'ONLINE', updatedAt: new Date() })
+    .where(eq(biometricDevices.serialNumber, deviceSn));
 
   const lines = payload.split(/\r?\n/);
   for (const line of lines) {
@@ -511,7 +587,8 @@ export async function processAdmsDeviceCmd(deviceSn: string, payload: string) {
         .set({ status, completedAt: new Date() })
         .where(and(
           eq(biometricDeviceCommands.admsCommandId, admsCommandId),
-          eq(biometricDeviceCommands.deviceId, device.id)
+          eq(biometricDeviceCommands.deviceId, device.id),
+          sql`${biometricDeviceCommands.status} <> 'CANCELLED'`,
         ))
         .returning();
 
@@ -563,10 +640,13 @@ export async function processAdmsDeviceCmd(deviceSn: string, payload: string) {
               updatedAt: new Date(),
             }).where(and(eq(deviceAccessStates.id, state.id), eq(deviceAccessStates.desiredVersion, updatedCmd.desiredVersion)));
           } else {
+            const permanentFailure = attemptsExhausted(state.attemptCount);
             await db.update(deviceAccessStates).set({
-              status: 'PENDING',
-              lastError: `ADMS returned ${returnCode ?? 'an unknown error'}`,
-              nextAttemptAt: new Date(Date.now() + retryDelayMs(state.attemptCount)),
+              status: permanentFailure ? 'FAILED' : 'PENDING',
+              lastError: permanentFailure
+                ? `ADMS returned ${returnCode ?? 'an unknown error'} after ${state.attemptCount} attempts`
+                : `ADMS returned ${returnCode ?? 'an unknown error'}`,
+              nextAttemptAt: permanentFailure ? new Date() : new Date(Date.now() + retryDelayMs(state.attemptCount)),
               updatedAt: new Date(),
             }).where(and(eq(deviceAccessStates.id, state.id), eq(deviceAccessStates.desiredVersion, updatedCmd.desiredVersion)));
           }
@@ -580,6 +660,75 @@ export async function processAdmsDeviceCmd(deviceSn: string, payload: string) {
 
 export async function listDevicesService(ctx: TenantContext) {
   return db.select().from(biometricDevices).where(and(tenantWhere(biometricDevices, ctx), accessibleBranchesWhere(biometricDevices, ctx))).orderBy(desc(biometricDevices.createdAt));
+}
+
+/** Operational health data for the settings/dashboard UI and external monitoring. */
+export async function getBiometricHealthService(ctx: TenantContext) {
+  const devices = await db.select({
+    id: biometricDevices.id,
+    branchId: biometricDevices.branchId,
+    deviceName: biometricDevices.deviceName,
+    serialNumber: biometricDevices.serialNumber,
+    status: biometricDevices.status,
+    lastSeenAt: biometricDevices.lastSeenAt,
+  })
+    .from(biometricDevices)
+    .where(and(tenantWhere(biometricDevices, ctx), accessibleBranchesWhere(biometricDevices, ctx)))
+    .orderBy(asc(biometricDevices.deviceName));
+
+  if (devices.length === 0) {
+    return {
+      generatedAt: new Date().toISOString(),
+      offlineAfterMs: config.biometricDeviceOfflineAfterMs,
+      summary: { online: 0, offline: 0, error: 0, pendingCommands: 0, failedCommands: 0 },
+      devices: [],
+    };
+  }
+
+  const deviceIds = devices.map(device => device.id);
+  const commandCounts = await db.select({
+    deviceId: biometricDeviceCommands.deviceId,
+    status: biometricDeviceCommands.status,
+    total: count(),
+  })
+    .from(biometricDeviceCommands)
+    .where(and(
+      inArray(biometricDeviceCommands.deviceId, deviceIds),
+      inArray(biometricDeviceCommands.status, ['PENDING', 'FAILED']),
+    ))
+    .groupBy(biometricDeviceCommands.deviceId, biometricDeviceCommands.status);
+
+  const commandsByDevice = new Map<string, { pending: number; failed: number }>();
+  for (const row of commandCounts) {
+    const counts = commandsByDevice.get(row.deviceId) ?? { pending: 0, failed: 0 };
+    if (row.status === 'PENDING') counts.pending = Number(row.total);
+    if (row.status === 'FAILED') counts.failed = Number(row.total);
+    commandsByDevice.set(row.deviceId, counts);
+  }
+
+  const offlineCutoff = Date.now() - config.biometricDeviceOfflineAfterMs;
+  const healthDevices = devices.map(device => {
+    const counts = commandsByDevice.get(device.id) ?? { pending: 0, failed: 0 };
+    const effectiveStatus = device.status === 'ONLINE'
+      && device.lastSeenAt
+      && device.lastSeenAt.getTime() <= offlineCutoff
+      ? 'OFFLINE'
+      : device.status;
+    return { ...device, status: effectiveStatus, pendingCommands: counts.pending, failedCommands: counts.failed };
+  });
+
+  return {
+    generatedAt: new Date().toISOString(),
+    offlineAfterMs: config.biometricDeviceOfflineAfterMs,
+    summary: {
+      online: healthDevices.filter(device => device.status === 'ONLINE').length,
+      offline: healthDevices.filter(device => device.status === 'OFFLINE').length,
+      error: healthDevices.filter(device => device.status === 'ERROR').length,
+      pendingCommands: healthDevices.reduce((total, device) => total + device.pendingCommands, 0),
+      failedCommands: healthDevices.reduce((total, device) => total + device.failedCommands, 0),
+    },
+    devices: healthDevices,
+  };
 }
 
 export async function listIdentitiesService(ctx: TenantContext) {

@@ -6,11 +6,11 @@
   "type": "commonjs",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc --project tsconfig.build.json",
+    "build": "tsc --project tsconfig.build.json && node scripts/copy-migrations.cjs",
     "start": "node dist/server.js",
     "prod": "npm run build && npm run start",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx src/db/migrate.js",
+    "db:migrate": "tsx src/db/migrate.ts",
     "db:migrate:prod": "node dist/db/migrate.js",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",

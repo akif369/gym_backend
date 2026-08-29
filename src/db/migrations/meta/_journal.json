@@ -141,6 +141,13 @@
       "when": 1788003600000,
       "tag": "0019_add_partially_refunded_status",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1788034200000,
+      "tag": "0020_biometric_worker_hardening",
+      "breakpoints": true
     }
   ]
 }

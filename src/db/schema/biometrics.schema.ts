@@ -15,7 +15,8 @@ export const biometricCommandStatusEnum = pgEnum('biometric_command_status', [
   'PENDING',
   'SENT',
   'COMPLETED',
-  'FAILED'
+  'FAILED',
+  'CANCELLED',
 ]);
 
 export const deviceAccessStateStatusEnum = pgEnum('device_access_state_status', [
